@@ -112,9 +112,9 @@ class ConflictNetTrainer:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         self.use_amp = cfg.get("amp", False) and "cuda" in device
-        self.grad_scaler: Optional[torch.cuda.amp.GradScaler] = None
+        self.grad_scaler: Optional[torch.amp.GradScaler] = None
         if self.use_amp:
-            self.grad_scaler = torch.cuda.amp.GradScaler()
+            self.grad_scaler = torch.amp.GradScaler("cuda")
 
         self._setup_optimizer()
         self._setup_wandb()

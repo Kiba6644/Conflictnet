@@ -237,14 +237,14 @@ def main():
 
     retries = 0
     if args.epochs is not None:
-        cfg["training"]["epochs"] = args.epochs
+        cfg["epochs"] = args.epochs
     if args.amp:
-        cfg["training"]["amp"] = True
+        cfg["amp"] = True
     if args.compile:
-        cfg["training"]["compile"] = True
+        cfg["compile"] = True
 
     while True:
-        trainer.train(n_epochs=args.epochs or cfg["training"].get("epochs", 30), pretrain_epochs=args.pretrain_epochs, start_epoch=start_epoch)
+        trainer.train(n_epochs=args.epochs or cfg.get("epochs", 30), pretrain_epochs=args.pretrain_epochs, start_epoch=start_epoch)
 
         if args.max_retries <= 0 or args.target_f1 <= 0:
             break
