@@ -78,10 +78,15 @@ class DeBERTaEncoder(nn.Module):
             trainable = sum(p.numel() for p in self.encoder.parameters() if p.requires_grad)
             total = sum(p.numel() for p in self.encoder.parameters())
             print(f"[LoRA] Trainable: {trainable:,} / {total:,} ({100*trainable/total:.2f}%)")
-        except ImportError:
+        except Exception as e:
+            logger.warning(f"Default peft failed ({e}), attempting fallback to peft==0.14.0...")
             import subprocess as _sp, sys as _sys
-            _sp.run([_sys.executable, "-m", "pip", "install", "-q", "peft==0.14.0"], check=False)
+            _sp.run([_sys.executable, "-m", "pip", "install", "-q", "--force-reinstall", "peft==0.14.0"], check=False)
             try:
+                # Re-import peft after downgrade
+                import importlib
+                import peft
+                importlib.reload(peft)
                 from peft import LoraConfig, TaskType, get_peft_model
                 config = LoraConfig(
                     task_type=TaskType.FEATURE_EXTRACTION,
@@ -92,9 +97,9 @@ class DeBERTaEncoder(nn.Module):
                     bias="none",
                 )
                 self.encoder = get_peft_model(self.encoder, config)
-                print("[LoRA] Applied peft at runtime")
+                print("[LoRA] Applied peft==0.14.0 at runtime")
             except Exception as _e:
-                print(f"[WARN] peft failed ({_e}), freezing DeBERTa")
+                print(f"[WARN] peft failed completely ({_e}), freezing DeBERTa")
                 for p in self.encoder.parameters():
                     p.requires_grad = False
 
