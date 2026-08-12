@@ -53,7 +53,7 @@ class Wav2Vec2Encoder(nn.Module):
         self.output_dim = 768
         try:
             from transformers import Wav2Vec2Model
-            enc = Wav2Vec2Model.from_pretrained(model_name, use_safetensors=True)
+            enc = Wav2Vec2Model.from_pretrained(model_name)
             if freeze:
                 for p in enc.parameters():
                     p.requires_grad = False

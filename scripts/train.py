@@ -161,8 +161,10 @@ def main():
     train_set = ConcatDataset(train_datasets)
     val_set = ConcatDataset(val_datasets)
 
-    # Dynamically determine num_workers to speed up data loading (Kaggle uses 4 cores for T4x2)
-    optimal_workers = min(4, os.cpu_count() or 4)
+    # Dynamically determine num_workers to speed up data loading per GPU process
+    cpus = os.cpu_count() or 4
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    optimal_workers = max(1, cpus // world_size)
     
     from torch.utils.data.distributed import DistributedSampler
     train_sampler = DistributedSampler(train_set) if local_rank != -1 else None
