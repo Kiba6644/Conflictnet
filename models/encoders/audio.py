@@ -102,7 +102,7 @@ class WavLMEncoder(nn.Module):
         self.output_dim = 768
         try:
             from transformers import WavLMModel
-            enc = WavLMModel.from_pretrained(model_name, use_safetensors=True)
+            enc = WavLMModel.from_pretrained(model_name)
             if freeze:
                 for p in enc.parameters():
                     p.requires_grad = False
@@ -177,7 +177,6 @@ class WavLMWeightedEncoder(nn.Module):
             from transformers import WavLMModel
             enc = WavLMModel.from_pretrained(
                 model_name,
-                use_safetensors=True,
                 output_hidden_states=True,
             )
             if freeze:

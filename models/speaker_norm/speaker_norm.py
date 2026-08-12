@@ -357,16 +357,33 @@ class SpeakerNormalizer(nn.Module):
 
     def _get_spk_model(self):
         if self._spk_model is None:
+            import os
+            import torch.distributed as dist
+            local_rank = int(os.environ.get("LOCAL_RANK", -1))
+            
             try:
                 from speechbrain.inference.speaker import EncoderClassifier  # type: ignore
+                
+                # Prevent DDP deadlock: Rank 0 downloads first, others wait
+                if local_rank > 0 and dist.is_initialized():
+                    dist.barrier()
+                    
                 self._spk_model = EncoderClassifier.from_hparams(
                     source=self._model_source,
                     savedir=f"pretrained_models/{self._model_source.replace('/', '_')}",
                 )
+                
+                if local_rank == 0 and dist.is_initialized():
+                    dist.barrier()
+                    
                 logger.info(f"[SpeakerNorm] Loaded ECAPA-TDNN from {self._model_source}")
             except Exception:
                 logger.warning("[SpeakerNorm] SpeechBrain unavailable — speaker embedding disabled")
                 self._spk_model = "disabled"
+                
+                # Still need to step the barrier if one rank fails to avoid deadlocking others
+                if local_rank == 0 and dist.is_initialized():
+                    dist.barrier()
         return self._spk_model
 
     # ------------------------------------------------------------------

@@ -45,7 +45,7 @@ class DeBERTaEncoder(nn.Module):
 
         try:
             from transformers import AutoModel, AutoTokenizer
-            self.encoder = AutoModel.from_pretrained(model_name, use_safetensors=True)
+            self.encoder = AutoModel.from_pretrained(model_name)
             self.tokenizer = AutoTokenizer.from_pretrained(model_name)
             self.output_dim = self.encoder.config.hidden_size
             # Gradient checkpointing: reduces peak VRAM ~25% on T4 (helpful for DDP)
