@@ -91,9 +91,9 @@ class ConflictNetTrainer:
                     self.model,
                     device_ids=[local_rank],
                     output_device=local_rank,
-                    # Avoids an all-reduce pass for params not used in a given forward;
-                    # all ConflictNet params are always used, so False is safe and faster.
-                    find_unused_parameters=False,
+                    # Must be True because some components (like swap_objective) 
+                    # are only used during pre-training phases.
+                    find_unused_parameters=True,
                 )
             elif torch.cuda.device_count() > 1:
                 logger.info(f"Using DataParallel across {torch.cuda.device_count()} GPUs.")
