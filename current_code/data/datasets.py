@@ -1,0 +1,1166 @@
+"""Dataset loaders for ConflictNet training datasets.
+
+Supported:
+  - IEMOCAP: USC emotional speech, 10,039 utterances, 4/6 emotion classes
+  - CREMA-D: 7,442 clips, 6 emotions, multiple speakers
+  - MUStARD++: Sarcasm/non-sarcasm with audio + text + video (text+audio only used here)
+  - MELD: Multimodal emotion in dialogue, 13,000+ utterances
+
+Each dataset returns a dict with:
+  - audio: (T_audio,) waveform tensor at 16kHz
+  - input_ids: (seq_len,) tokenizer output
+  - attention_mask: (seq_len,)
+  - conflict_binary: int — 1 if conflict utterance
+  - conflict_type_labels: (3,) multi-hot — [sarcasm, suppression, deception]
+  - severity: float — [0, 1] intensity (if available)
+  - speaker_id: str
+  - gender: str or None
+
+Collation: a custom collate_fn handles variable-length audio.
+"""
+
+from __future__ import annotations
+
+import csv
+import json
+import logging
+import os
+import random
+import re as _re
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
+import torch
+import torchaudio
+from torch.utils.data import Dataset
+from transformers import AutoTokenizer
+
+logger = logging.getLogger(__name__)
+
+SAMPLE_RATE = 16000
+MAX_AUDIO_LEN = 10.0  # seconds
+MAX_TEXT_LEN = 512
+
+IEMOCAP_EMOTION_MAP = {
+    "ang": 0, "hap": 1, "exc": 1,  # merge excited→happy
+    "sad": 2, "neu": 3, "fru": 4, "fea": 5, "sur": 6, "dis": 7, "oth": 8,
+}
+CONFLICT_EMOTIONS = {"ang", "fru"}  # used for binary conflict label in IEMOCAP
+
+
+# ---------------------------------------------------------------------------
+# Shared utilities
+# ---------------------------------------------------------------------------
+
+def load_audio(path: str, target_sr: int = SAMPLE_RATE, max_len: float = MAX_AUDIO_LEN) -> torch.Tensor:
+    """Load and resample audio file to target_sr, truncate to max_len seconds."""
+    waveform, sr = torchaudio.load(path)
+    if waveform.shape[0] > 1:
+        waveform = waveform.mean(dim=0, keepdim=True)  # stereo → mono
+    if sr != target_sr:
+        waveform = torchaudio.functional.resample(waveform, sr, target_sr)
+    max_samples = int(max_len * target_sr)
+    waveform = waveform[:, :max_samples]
+    return waveform.squeeze(0)  # (T,)
+
+
+def tokenize(
+    text: str,
+    tokenizer: AutoTokenizer,
+    max_len: int = MAX_TEXT_LEN,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Tokenize text, return (input_ids, attention_mask)."""
+    enc = tokenizer(  # type: ignore[operator]
+        text,
+        max_length=max_len,
+        truncation=True,
+        padding="max_length",
+        return_tensors="pt",
+    )
+    return enc["input_ids"].squeeze(0), enc["attention_mask"].squeeze(0)
+
+
+# ---------------------------------------------------------------------------
+# Word divergence helpers (MFA alignment pipeline)
+# ---------------------------------------------------------------------------
+
+
+def compute_token_word_boundaries(
+    text: str,
+    tokenizer: AutoTokenizer,
+    max_len: int = MAX_TEXT_LEN,
+) -> List[Tuple[int, int]]:
+    """Map each word in text to its token span [token_start, token_end).
+
+    Uses tokenizer ``return_offsets_mapping`` to align character-level
+    word boundaries to token positions. Excludes special tokens (CLS, SEP).
+
+    Args:
+        text: The utterance text.
+        tokenizer: HuggingFace tokenizer instance.
+        max_len: Max token length (same as ``tokenize()``).
+
+    Returns:
+        List of ``(token_start_idx, token_end_idx)`` per word.
+        Empty list if tokenization yields no content tokens.
+    """
+    enc = tokenizer(  # type: ignore[operator]
+        text,
+        max_length=max_len,
+        truncation=True,
+        padding=False,
+        return_offsets_mapping=True,
+    )
+    offsets = enc.offset_mapping
+
+    token_chars = []
+    for i, (cs, ce) in enumerate(offsets):
+        if cs is not None and ce is not None and cs < ce:
+            token_chars.append((i, cs, ce))
+
+    if not token_chars:
+        return []
+
+    word_spans = []
+    for m in _re.finditer(r'\S+', text):
+        ws, we = m.start(), m.end()
+        if we > ws:
+            word_spans.append((ws, we))
+
+    boundaries = []
+    for ws, we in word_spans:
+        token_start = None
+        token_end = None
+        for idx, cs, ce in token_chars:
+            if cs >= ws and cs < we:
+                if token_start is None:
+                    token_start = idx
+                token_end = idx + 1
+        if token_start is not None and token_end is not None and token_end > token_start:
+            boundaries.append((token_start, token_end))
+
+    return boundaries
+
+
+def _load_word_timestamps_from_textgrid(
+    textgrid_path: str,
+) -> Optional[List[Tuple[float, float]]]:
+    """Load per-word audio timestamps from an MFA ``.TextGrid`` file.
+
+    Args:
+        textgrid_path: Path to the ``.TextGrid`` file.
+
+    Returns:
+        List of ``(start_seconds, end_seconds)`` per word, or ``None``
+        if the file is missing or unparseable.
+    """
+    if not os.path.isfile(textgrid_path):
+        return None
+    try:
+        from models.alignment.word_divergence import parse_textgrid
+        words = parse_textgrid(textgrid_path)
+        if not words:
+            return None
+        return [(round(start, 3), round(end, 3)) for _, start, end in words]
+    except Exception:
+        logger.warning(f"Failed to parse TextGrid: {textgrid_path}")
+        return None
+
+
+def _textgrid_path_from_wav(
+    wav_path: str,
+    dataset_root: str,
+    textgrid_root: Optional[str],
+) -> Optional[str]:
+    """Derive TextGrid path by mirroring wav directory structure.
+
+    For ``wav_path`` rooted at ``dataset_root``, compute the relative
+    path and look for a matching ``.TextGrid`` under ``textgrid_root``.
+    """
+    if textgrid_root is None or not wav_path:
+        return None
+    try:
+        rel = os.path.relpath(wav_path, start=dataset_root)
+    except ValueError:
+        return os.path.join(textgrid_root, Path(wav_path).stem + ".TextGrid")
+    tg_rel = os.path.splitext(rel)[0] + ".TextGrid"
+    return os.path.join(textgrid_root, tg_rel)
+
+
+# ---------------------------------------------------------------------------
+# IEMOCAP
+# ---------------------------------------------------------------------------
+
+class IEMOCAPDataset(Dataset):
+    """IEMOCAP dataset loader.
+
+    Expects IEMOCAP data in the standard release directory structure:
+      root/Session{1-5}/sentences/wav/{dialogue_id}/{utt_id}.wav
+      root/Session{1-5}/dialog/EmoEvaluation/{dialogue_id}.txt
+    """
+
+    def __init__(
+        self,
+        root: str,
+        tokenizer_name: str = "microsoft/deberta-v3-large",
+        sessions: Optional[List[int]] = None,
+        split: str = "train",
+        conflict_as_anger_frustration: bool = True,
+        textgrid_root: Optional[str] = None,
+    ):
+        self.root = Path(root)
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+        self.sessions = sessions or [1, 2, 3, 4, 5]
+        self.conflict_as_anger_frustration = conflict_as_anger_frustration
+        self.textgrid_root = textgrid_root
+        self.items = self._scan_items()
+        logger.info(f"[IEMOCAP] {split}: {len(self.items)} utterances")
+
+    def _scan_items(self) -> List[Dict]:
+        items = []
+        for sess in self.sessions:
+            sess_dir = self.root / f"Session{sess}"
+            eval_dir = sess_dir / "dialog" / "EmoEvaluation"
+            wav_root = sess_dir / "sentences" / "wav"
+            transcript_root = sess_dir / "dialog" / "transcriptions"
+
+            if not eval_dir.exists():
+                logger.warning(f"[IEMOCAP] Missing evaluation dir: {eval_dir}")
+                continue
+
+            for eval_file in eval_dir.glob("*.txt"):
+                dialogue_id = eval_file.stem
+                conv_id = f"iemocap_{dialogue_id}"
+                transcripts = self._load_transcriptions(
+                    transcript_root / f"{dialogue_id}.txt"
+                )
+                turn_idx = 0
+                with open(eval_file, "r") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("%") or "\t" not in line:
+                            continue
+                        parts = line.split("\t")
+                        if len(parts) < 4:
+                            continue
+                        utt_id = parts[1].strip()
+                        emotion = parts[2].strip()
+                        wav_path = wav_root / dialogue_id / f"{utt_id}.wav"
+                        if not wav_path.exists():
+                            continue
+                        text = transcripts.get(utt_id, "")
+                        conflict = emotion in CONFLICT_EMOTIONS if self.conflict_as_anger_frustration else 0
+                        items.append({
+                            "wav_path": str(wav_path),
+                            "text": text,
+                            "emotion": emotion,
+                            "conflict_binary": int(conflict),
+                            "conflict_type_labels": [0, int(conflict), 0],  # [sarcasm, suppression, deception]
+                            "severity": float(conflict),  # binary proxy; no real severity annotation in IEMOCAP
+                        "speaker_id": utt_id[:6],  # e.g. 'Ses01F' — session+gender uniquely identifies speaker
+                        "gender": "F" if utt_id[5] == "F" else "M",
+                            "conversation_id": conv_id,
+                            "turn_index": turn_idx,
+                        })
+                        turn_idx += 1
+        return items
+
+    def _load_transcriptions(self, path: Path) -> Dict[str, str]:
+        transcripts = {}
+        if not path.exists():
+            return transcripts
+        with open(path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if " [" in line:
+                    utt_id, rest = line.split(" [", 1)
+                    text = rest.split("]:")[1].strip() if "]:" in rest else ""
+                    transcripts[utt_id.strip()] = text
+        return transcripts
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        item = self.items[idx]
+        audio = load_audio(item["wav_path"])
+        input_ids, attention_mask = tokenize(item["text"], self.tokenizer)
+
+        text = item["text"]
+        word_timestamps: Optional[List[Tuple[float, float]]] = None
+        token_word_boundaries: Optional[List[Tuple[int, int]]] = None
+        if self.textgrid_root is not None:
+            tg_path = _textgrid_path_from_wav(
+                item["wav_path"], str(self.root), self.textgrid_root
+            )
+            if tg_path is not None:
+                word_timestamps = _load_word_timestamps_from_textgrid(tg_path)
+                if word_timestamps is not None and word_timestamps:
+                    token_word_boundaries = compute_token_word_boundaries(text, self.tokenizer)
+
+        return {
+            "audio": audio,
+            "audio_np": audio.numpy(),
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "conflict_binary": torch.tensor(item["conflict_binary"], dtype=torch.long),
+            "conflict_type_labels": torch.tensor(item["conflict_type_labels"], dtype=torch.float),
+            "severity": torch.tensor(item["severity"], dtype=torch.float),
+            "speaker_id": item["speaker_id"],
+            "gender": item["gender"],
+            "text": text,
+            "utterance_id": Path(item["wav_path"]).stem,
+            "conversation_id": item.get("conversation_id", Path(item["wav_path"]).stem),
+            "turn_index": item.get("turn_index", 0),
+            "word_timestamps": word_timestamps,
+            "token_word_boundaries": token_word_boundaries,
+        }
+
+
+# ---------------------------------------------------------------------------
+# MUStARD++
+# ---------------------------------------------------------------------------
+
+class MUStARDDataset(Dataset):
+    """MUStARD++ sarcasm dataset.
+
+    Expects: root/mustard++_raw_data.json  (download from repo)
+             root/{wav_dir}/{video_id}/{clip_id}.wav  (default wav_dir='utterances_final')
+    """
+
+    def __init__(
+        self,
+        root: str,
+        json_file: str = "mustard++_raw_data.json",
+        tokenizer_name: str = "microsoft/deberta-v3-large",
+        split: str = "train",
+        train_ratio: float = 0.8,
+        wav_dir: str = "utterances_final",
+        wav_pattern: str = "*.wav",
+        textgrid_root: Optional[str] = None,
+    ):
+        self.root = Path(root)
+        self.wav_dir = Path(wav_dir) if not Path(wav_dir).is_absolute() else Path(wav_dir)
+        self.wav_pattern = wav_pattern
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+        self.textgrid_root = textgrid_root
+        self.items = self._load_items(json_file, split, train_ratio)
+        logger.info(f"[MUStARD++] {split}: {len(self.items)} utterances")
+
+    def _load_items(self, json_file: str, split: str, train_ratio: float) -> List[Dict]:
+        json_path = self.root / json_file
+        if not json_path.exists():
+            logger.warning(f"[MUStARD++] JSON not found: {json_path}")
+            return []
+        with open(json_path) as f:
+            data = json.load(f)
+
+        wav_search_root = self.root / self.wav_dir if not self.wav_dir.is_absolute() else self.wav_dir
+        logger.info(f"[MUStARD++] Searching for wavs in {wav_search_root} with pattern {self.wav_pattern}")
+
+        # Collect all samples with speaker info
+        all_samples = []
+        for key, sample in data.items():
+            wav_candidates = list(wav_search_root.rglob(f"{key}*{self.wav_pattern.lstrip('*') if self.wav_pattern.startswith('*') else ''}"))
+            if not wav_candidates:
+                wav_candidates = list(wav_search_root.rglob(f"**/{key}{self.wav_pattern.lstrip('*')}"))
+            if not wav_candidates:
+                wav_candidates = list(wav_search_root.rglob(self.wav_pattern))
+                wav_candidates = [p for p in wav_candidates if key in p.stem]
+            if not wav_candidates:
+                logger.warning(f"[MUStARD++] No wav found for key={key}, searched in {wav_search_root}")
+                continue
+            all_samples.append({
+                "wav_path": str(wav_candidates[0]),
+                "text": sample.get("utterance", ""),
+                "sarcasm": int(sample.get("sarcasm", 0)),
+                "speaker_id": sample.get("speaker", "unknown"),
+            })
+
+        # Speaker-stratified split: group by speaker, assign whole speakers to train/val
+        speaker_groups: Dict[str, List[Dict]] = {}
+        for s in all_samples:
+            speaker_groups.setdefault(s["speaker_id"], []).append(s)
+        rng = random.Random(42)  # deterministic shuffle for reproducibility
+        speaker_ids = list(speaker_groups.keys())
+        rng.shuffle(speaker_ids)
+
+        train_items: List[Dict] = []
+        val_items: List[Dict] = []
+        target_train = int(len(all_samples) * train_ratio)
+        for sid in speaker_ids:
+            samples = speaker_groups[sid]
+            if len(train_items) + len(samples) <= target_train or not val_items:
+                train_items.extend(samples)
+            else:
+                val_items.extend(samples)
+        return train_items if split == "train" else val_items
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        item = self.items[idx]
+        audio = load_audio(item["wav_path"])
+        input_ids, attention_mask = tokenize(item["text"], self.tokenizer)
+        sarcasm = item["sarcasm"]
+        text = item["text"]
+        word_timestamps: Optional[List[Tuple[float, float]]] = None
+        token_word_boundaries: Optional[List[Tuple[int, int]]] = None
+        if self.textgrid_root is not None:
+            tg_path = _textgrid_path_from_wav(
+                item["wav_path"], str(self.root), self.textgrid_root
+            )
+            if tg_path is not None:
+                word_timestamps = _load_word_timestamps_from_textgrid(tg_path)
+                if word_timestamps is not None and word_timestamps:
+                    token_word_boundaries = compute_token_word_boundaries(text, self.tokenizer)
+        return {
+            "audio": audio,
+            "audio_np": audio.numpy(),
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "conflict_binary": torch.tensor(sarcasm, dtype=torch.long),
+            "conflict_type_labels": torch.tensor([sarcasm, 0, 0], dtype=torch.float),
+            "severity": torch.tensor(float(sarcasm), dtype=torch.float),  # binary proxy; no real severity in MUStARD++
+            "speaker_id": item["speaker_id"],
+            "gender": None,
+            "text": item["text"],
+            "utterance_id": Path(item["wav_path"]).stem,
+            "word_timestamps": word_timestamps,
+            "token_word_boundaries": token_word_boundaries,
+        }
+
+
+# ---------------------------------------------------------------------------
+# CREMA-D
+# ---------------------------------------------------------------------------
+
+CREMAD_EMOTIONS = {
+    "ANG": "ang", "DIS": "dis", "FEA": "fea",
+    "HAP": "hap", "NEU": "neu", "SAD": "sad",
+}
+CREMAD_CONFLICT_EMOTIONS = {"ANG", "DIS", "FEA"}
+
+
+class CREMADDataset(Dataset):
+    """CREMA-D dataset loader.
+
+    Expects: root/AudioWAV/{actor}_{sentence}_{emotion}_{level}.wav
+    Download from: https://github.com/CheyneyComputerScience/CREMA-D
+    """
+
+    def __init__(
+        self,
+        root: str,
+        tokenizer_name: str = "microsoft/deberta-v3-large",
+        split: str = "train",
+        train_ratio: float = 0.8,
+        textgrid_root: Optional[str] = None,
+    ):
+        self.root = Path(root)
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+        self.textgrid_root = textgrid_root
+        self.items = self._scan_items(split, train_ratio)
+        logger.info(f"[CREMA-D] {split}: {len(self.items)} utterances")
+
+    # CREMA-D sentences (12 fixed sentences used in recordings)
+    _SENTENCES = {
+        "IEO": "It's eleven o'clock.",
+        "TIE": "That is exactly what happened.",
+        "IOM": "I'm on my way to the meeting.",
+        "IWW": "I wonder what this is about.",
+        "TAI": "The airplane is almost full.",
+        "MTI": "Maybe tomorrow it will be cold.",
+        "IWL": "I would like a new alarm clock.",
+        "ITH": "I think I have a doctor's appointment.",
+        "DFA": "Don't forget a jacket.",
+        "ITS": "I think I've seen this before.",
+        "TSI": "The surface is slippery.",
+        "WSI": "We'll stop in a couple of minutes.",
+    }
+
+    def _scan_items(self, split: str, train_ratio: float) -> List[Dict]:
+        wav_dir = self.root / "AudioWAV"
+        if not wav_dir.exists():
+            logger.warning(f"[CREMA-D] Missing AudioWAV dir: {wav_dir}")
+            return []
+
+        all_wavs = list(wav_dir.glob("*.wav"))
+
+        # Collect all samples with actor info
+        all_samples = []
+        for wav in all_wavs:
+            parts = wav.stem.split("_")
+            if len(parts) < 4:
+                continue
+            actor_id = parts[0]
+            sentence_id = parts[1]
+            emotion = parts[2]
+            text = self._SENTENCES.get(sentence_id, "")
+            conflict = emotion in CREMAD_CONFLICT_EMOTIONS
+            all_samples.append({
+                "wav_path": str(wav),
+                "text": text,
+                "emotion": CREMAD_EMOTIONS.get(emotion, emotion.lower()),
+                "conflict_binary": int(conflict),
+                "conflict_type_labels": [0, int(conflict), 0],
+                "severity": float(conflict),
+                "speaker_id": f"cremad_{actor_id}",
+                "gender": None,
+            })
+
+        # Speaker-stratified split: group by actor, assign whole actors to train/val
+        speaker_groups: Dict[str, List[Dict]] = {}
+        for s in all_samples:
+            speaker_groups.setdefault(s["speaker_id"], []).append(s)
+        rng = random.Random(42)
+        speaker_ids = list(speaker_groups.keys())
+        rng.shuffle(speaker_ids)
+
+        train_items: List[Dict] = []
+        val_items: List[Dict] = []
+        target_train = int(len(all_samples) * train_ratio)
+        for sid in speaker_ids:
+            samples = speaker_groups[sid]
+            if len(train_items) + len(samples) <= target_train or not val_items:
+                train_items.extend(samples)
+            else:
+                val_items.extend(samples)
+        return train_items if split == "train" else val_items
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        item = self.items[idx]
+        audio = load_audio(item["wav_path"])
+        input_ids, attention_mask = tokenize(item["text"], self.tokenizer)
+        text = item["text"]
+        word_timestamps: Optional[List[Tuple[float, float]]] = None
+        token_word_boundaries: Optional[List[Tuple[int, int]]] = None
+        if self.textgrid_root is not None:
+            tg_path = _textgrid_path_from_wav(
+                item["wav_path"], str(self.root), self.textgrid_root
+            )
+            if tg_path is not None:
+                word_timestamps = _load_word_timestamps_from_textgrid(tg_path)
+                if word_timestamps is not None and word_timestamps:
+                    token_word_boundaries = compute_token_word_boundaries(text, self.tokenizer)
+        return {
+            "audio": audio,
+            "audio_np": audio.numpy(),
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "conflict_binary": torch.tensor(item["conflict_binary"], dtype=torch.long),
+            "conflict_type_labels": torch.tensor(item["conflict_type_labels"], dtype=torch.float),
+            "severity": torch.tensor(item["severity"], dtype=torch.float),
+            "speaker_id": item["speaker_id"],
+            "gender": item["gender"],
+            "text": item["text"],
+            "utterance_id": Path(item["wav_path"]).stem,
+            "word_timestamps": word_timestamps,
+            "token_word_boundaries": token_word_boundaries,
+        }
+
+
+# ---------------------------------------------------------------------------
+# MELD (Multimodal EmotionLines Dataset)
+# ---------------------------------------------------------------------------
+
+MELD_CONFLICT_EMOTIONS = {"anger", "disgust", "fear"}
+
+
+class MELDDataset(Dataset):
+    """MELD dataset loader with dialogue context.
+
+    Expects standard MELD directory structure:
+      root/train/train_sent_emo.csv  (or dev/test)
+      root/train/train_splits/dia{N}_utt{M}.wav
+
+    Download from: https://affective-meld.github.io/
+    """
+
+    def __init__(
+        self,
+        root: str,
+        tokenizer_name: str = "microsoft/deberta-v3-large",
+        split: str = "train",
+        textgrid_root: Optional[str] = None,
+    ):
+        self.root = Path(root)
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+        self.split = split
+        self.textgrid_root = textgrid_root
+        self.items = self._load_items()
+        logger.info(f"[MELD] {split}: {len(self.items)} utterances")
+
+    def _load_items(self) -> List[Dict]:
+        split_map = {"train": "train", "val": "dev", "test": "test"}
+        split_name = split_map.get(self.split, self.split)
+        csv_path = self.root / split_name / f"{split_name}_sent_emo.csv"
+        wav_dir = self.root / split_name / f"{split_name}_splits"
+
+        if not csv_path.exists():
+            logger.warning(f"[MELD] CSV not found: {csv_path}")
+            return []
+
+        items = []
+        with open(csv_path, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            available = [c.strip() for c in reader.fieldnames] if reader.fieldnames else []
+
+            def _find_field(candidates):
+                for candidate in candidates:
+                    for fname in available:
+                        if fname.lower().replace("-", "_").replace(" ", "_") == candidate.lower().replace("-", "_").replace(" ", "_"):
+                            return fname
+                return None
+
+            field_map = {}
+            required = {
+                "dialogue_id": ["Dialogue_ID", "dialogue_id", "DialogueId"],
+                "utterance_id": ["Utterance_ID", "utterance_id", "UtteranceId"],
+                "utterance": ["Utterance", "utterance", "text", "Text"],
+                "emotion": ["Emotion", "emotion", "Sentiment", "sentiment"],
+                "speaker": ["Speaker", "speaker", "Speaker_ID", "speaker_id"],
+            }
+            for key, candidates in required.items():
+                found = _find_field(candidates)
+                if found is None:
+                    raise KeyError(
+                        f"[MELD] Required CSV field not found in {csv_path}. "
+                        f"Looked for {candidates}, found columns: {available}"
+                    )
+                field_map[key] = found
+
+            for row in reader:
+                dia_id = row.get(field_map["dialogue_id"], "")
+                utt_id = row.get(field_map["utterance_id"], "")
+                text = row.get(field_map["utterance"], "")
+                emotion = row.get(field_map["emotion"], "neutral").lower()
+                speaker = row.get(field_map["speaker"], "unknown")
+
+                wav_path = wav_dir / f"dia{dia_id}_utt{utt_id}.wav"
+                if not wav_path.exists():
+                    continue
+
+                conflict = emotion in MELD_CONFLICT_EMOTIONS
+                items.append({
+                    "wav_path": str(wav_path),
+                    "text": text,
+                    "emotion": emotion,
+                    "dialogue_id": dia_id,
+                    "utterance_id": int(utt_id) if utt_id.isdigit() else 0,
+                    "conflict_binary": int(conflict),
+                    "conflict_type_labels": [0, int(conflict), 0],  # suppression
+                    "severity": float(conflict),  # binary proxy; no real severity in MELD
+                    "speaker_id": f"meld_{speaker}",
+                    "gender": None,
+                })
+        return items
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        item = self.items[idx]
+        audio = load_audio(item["wav_path"])
+        input_ids, attention_mask = tokenize(item["text"], self.tokenizer)
+        text = item["text"]
+        word_timestamps: Optional[List[Tuple[float, float]]] = None
+        token_word_boundaries: Optional[List[Tuple[int, int]]] = None
+        if self.textgrid_root is not None:
+            tg_path = _textgrid_path_from_wav(
+                item["wav_path"], str(self.root), self.textgrid_root
+            )
+            if tg_path is not None:
+                word_timestamps = _load_word_timestamps_from_textgrid(tg_path)
+                if word_timestamps is not None and word_timestamps:
+                    token_word_boundaries = compute_token_word_boundaries(text, self.tokenizer)
+        return {
+            "audio": audio,
+            "audio_np": audio.numpy(),
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "conflict_binary": torch.tensor(item["conflict_binary"], dtype=torch.long),
+            "conflict_type_labels": torch.tensor(item["conflict_type_labels"], dtype=torch.float),
+            "severity": torch.tensor(item["severity"], dtype=torch.float),
+            "speaker_id": item["speaker_id"],
+            "gender": item["gender"],
+            "text": item["text"],
+            "utterance_id": Path(item["wav_path"]).stem,
+            "conversation_id": f"meld_{item['dialogue_id']}",
+            "turn_index": int(item["utterance_id"]),
+            "word_timestamps": word_timestamps,
+            "token_word_boundaries": token_word_boundaries,
+        }
+
+
+# ---------------------------------------------------------------------------
+# CMU-MOSEI
+# ---------------------------------------------------------------------------
+
+CMUMOSEI_CONFLICT_EMOTIONS = {"anger", "disgust", "fear"}
+
+
+class CMUMOSEIDataset(Dataset):
+    """CMU-MOSEI dataset loader.
+
+    Expects the standard CMU Multimodal SDK format:
+      root/CMU_MOSEI/Labeled/{split}.csv
+      root/CMU_MOSEI/Audio/WAV_16000/{utterance_id}.wav
+
+    Each CSV row: utterance_id, text, emotion (lowercase label).
+
+    Download from: https://github.com/A2Zadeh/CMU-MultimodalSDK
+    """
+
+    def __init__(
+        self,
+        root: str,
+        tokenizer_name: str = "microsoft/deberta-v3-large",
+        split: str = "train",
+        textgrid_root: Optional[str] = None,
+    ):
+        self.root = Path(root)
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+        self.split = split
+        self.textgrid_root = textgrid_root
+        self.items = self._load_items()
+        logger.info(f"[CMU-MOSEI] {split}: {len(self.items)} utterances")
+
+    def _load_items(self) -> List[Dict]:
+        csv_path = self.root / "CMU_MOSEI" / "Labeled" / f"{self.split}.csv"
+        wav_root = self.root / "CMU_MOSEI" / "Audio" / "WAV_16000"
+
+        if not csv_path.exists():
+            logger.warning(f"[CMU-MOSEI] CSV not found: {csv_path}")
+            return []
+
+        items = []
+        with open(csv_path, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            available = [c.strip() for c in reader.fieldnames] if reader.fieldnames else []
+
+            def _find_field(candidates):
+                for candidate in candidates:
+                    for fname in available:
+                        if fname.lower().replace("-", "_").replace(" ", "_") == candidate.lower().replace("-", "_").replace(" ", "_"):
+                            return fname
+                return None
+
+            required = {
+                "utterance_id": ["utterance_id", "Utterance_ID", "id", "ID"],
+                "text": ["text", "Text", "utterance", "Utterance"],
+                "emotion": ["emotion", "Emotion", "label", "Label"],
+            }
+            field_map = {}
+            for key, candidates in required.items():
+                found = _find_field(candidates)
+                if found is None:
+                    raise KeyError(
+                        f"[CMU-MOSEI] Required CSV field not found in {csv_path}. "
+                        f"Looked for {candidates}, found columns: {available}"
+                    )
+                field_map[key] = found
+
+            for row in reader:
+                uid = row.get(field_map["utterance_id"], "").strip()
+                text = row.get(field_map["text"], "").strip()
+                emotion = row.get(field_map["emotion"], "neutral").strip().lower()
+
+                if not uid or not text:
+                    continue
+
+                wav_path = wav_root / f"{uid}.wav"
+                try:
+                    if not wav_path.exists():
+                        logger.debug(f"[CMU-MOSEI] Missing wav: {wav_path}")
+                        continue
+                except OSError:
+                    continue
+
+                conflict = emotion in CMUMOSEI_CONFLICT_EMOTIONS
+                # CMU-MOSEI utterance IDs: {video_id}_{segment}; use video_id as speaker proxy
+                speaker_prefix = uid.split("_")[0] if "_" in uid else uid
+                items.append({
+                    "wav_path": str(wav_path),
+                    "text": text,
+                    "emotion": emotion,
+                    "utterance_id": uid,
+                    "conflict_binary": int(conflict),
+                    "conflict_type_labels": [0, int(conflict), 0],  # suppression
+                    "severity": float(conflict),  # binary proxy; no real severity in CMU-MOSEI
+                    "speaker_id": f"mosei_{speaker_prefix}",
+                    "gender": None,
+                })
+        return items
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        item = self.items[idx]
+        try:
+            audio = load_audio(item["wav_path"])
+        except Exception as e:
+            logger.warning(f"[CMU-MOSEI] Failed to load audio at idx {idx}: {e}")
+            audio = torch.zeros(int(SAMPLE_RATE * 1.0))
+        input_ids, attention_mask = tokenize(item["text"], self.tokenizer)
+        text = item["text"]
+        word_timestamps: Optional[List[Tuple[float, float]]] = None
+        token_word_boundaries: Optional[List[Tuple[int, int]]] = None
+        if self.textgrid_root is not None:
+            tg_path = _textgrid_path_from_wav(
+                item["wav_path"], str(self.root), self.textgrid_root
+            )
+            if tg_path is not None:
+                word_timestamps = _load_word_timestamps_from_textgrid(tg_path)
+                if word_timestamps is not None and word_timestamps:
+                    token_word_boundaries = compute_token_word_boundaries(text, self.tokenizer)
+        return {
+            "audio": audio,
+            "audio_np": audio.numpy(),
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "conflict_binary": torch.tensor(item["conflict_binary"], dtype=torch.long),
+            "conflict_type_labels": torch.tensor(item["conflict_type_labels"], dtype=torch.float),
+            "severity": torch.tensor(item["severity"], dtype=torch.float),
+            "speaker_id": item["speaker_id"],
+            "gender": item["gender"],
+            "text": item["text"],
+            "utterance_id": Path(item["wav_path"]).stem,
+            "word_timestamps": word_timestamps,
+            "token_word_boundaries": token_word_boundaries,
+        }
+
+
+# ---------------------------------------------------------------------------
+# CASE 2026 — Conflict-Aware Sarcasm Evaluation Benchmark
+# ---------------------------------------------------------------------------
+
+CASE_CONFLICT_EMOTIONS = {"sarcasm", "sarcastic", "angry", "frustrated", "disgust"}
+CASE_TYPE_MAP = {
+    "sarcasm": [1, 0, 0],
+    "sarcastic": [1, 0, 0],
+    "angry": [0, 1, 0],
+    "frustrated": [0, 1, 0],
+    "disgust": [0, 1, 0],
+    "fear": [0, 0, 0],
+    "neutral": [0, 0, 0],
+    "sad": [0, 0, 0],
+    "happy": [0, 0, 0],
+    "surprise": [0, 0, 0],
+}
+
+
+class CASEDataset(Dataset):
+    """CASE 2026 benchmark — Conflict-Aware Sarcasm Evaluation.
+
+    Expected directory structure::
+
+        {root}/
+            metadata.jsonl        — one JSON object per line
+            wav/                  — 16kHz mono WAV files referenced by utterance_id
+
+    Each JSONL line has the following fields:
+
+    .. code-block:: json
+
+        {
+            "utterance_id": "case_00001",
+            "text": "Great, another meeting...",
+            "emotion": "sarcasm",
+            "speaker_id": "speaker_042",
+            "gender": "F",
+            "severity": 0.85
+        }
+
+    Subtype mapping:
+        - sarcasm / sarcastic → [1, 0, 0]
+        - angry / frustrated / disgust → [0, 1, 0] (suppression-equivalent)
+        - all other emotions → [0, 0, 0]
+
+    Download: https://github.com/anonymous/case2026 (placeholder)
+    """
+
+    def __init__(
+        self,
+        root: str,
+        tokenizer_name: str = "microsoft/deberta-v3-large",
+        split: str = "train",
+        max_samples: Optional[int] = None,
+        textgrid_root: Optional[str] = None,
+    ):
+        self.root = Path(root)
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+        self.split = split
+        self.textgrid_root = textgrid_root
+        self.items = self._load_items(max_samples)
+        logger.info(f"[CASE] {split}: {len(self.items)} utterances")
+
+    def _load_items(self, max_samples: Optional[int]) -> List[Dict]:
+        meta_path = self.root / "metadata.jsonl"
+        if not meta_path.exists():
+            logger.warning(f"[CASE] metadata not found: {meta_path}")
+            return []
+
+        wav_root = self.root / "wav"
+        if not wav_root.exists():
+            logger.warning(f"[CASE] wav directory not found: {wav_root}")
+            return []
+
+        items = []
+        with open(meta_path, "r", encoding="utf-8") as f:
+            for i, line in enumerate(f):
+                if max_samples is not None and len(items) >= max_samples:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                row = json.loads(line)
+                uid = row.get("utterance_id", f"case_{i:06d}")
+                text = row.get("text", "").strip()
+                emotion = row.get("emotion", "neutral").strip().lower()
+                speaker_id = row.get("speaker_id", f"unknown_{i}")
+                gender = row.get("gender", None)
+                severity = float(row.get("severity", 0.7 if emotion in CASE_CONFLICT_EMOTIONS else 0.1))
+                type_labels = CASE_TYPE_MAP.get(emotion, [0, 0, 0])
+                conflict_binary = 1 if emotion in CASE_CONFLICT_EMOTIONS else 0
+
+                wav_path = wav_root / f"{uid}.wav"
+                if not wav_path.exists():
+                    logger.debug(f"[CASE] Missing wav: {wav_path}")
+                    wav_path = None
+
+                items.append({
+                    "wav_path": str(wav_path) if wav_path else None,
+                    "text": text,
+                    "emotion": emotion,
+                    "utterance_id": uid,
+                    "conflict_binary": conflict_binary,
+                    "conflict_type_labels": type_labels,
+                    "severity": severity,
+                    "speaker_id": speaker_id,
+                    "gender": gender,
+                })
+        return items
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        item = self.items[idx]
+        if item["wav_path"] is not None:
+            try:
+                audio = load_audio(item["wav_path"])
+            except Exception as e:
+                logger.warning(f"[CASE] Failed to load audio idx {idx}: {e}")
+                audio = torch.zeros(int(SAMPLE_RATE * 1.0))
+        else:
+            audio = torch.zeros(int(SAMPLE_RATE * 1.0))
+        input_ids, attention_mask = tokenize(item["text"], self.tokenizer)
+        text = item["text"]
+        word_timestamps: Optional[List[Tuple[float, float]]] = None
+        token_word_boundaries: Optional[List[Tuple[int, int]]] = None
+        if self.textgrid_root is not None and item["wav_path"] is not None:
+            tg_path = _textgrid_path_from_wav(
+                item["wav_path"], str(self.root), self.textgrid_root
+            )
+            if tg_path is not None:
+                word_timestamps = _load_word_timestamps_from_textgrid(tg_path)
+                if word_timestamps is not None and word_timestamps:
+                    token_word_boundaries = compute_token_word_boundaries(text, self.tokenizer)
+        return {
+            "audio": audio,
+            "audio_np": audio.numpy(),
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "conflict_binary": torch.tensor(item["conflict_binary"], dtype=torch.long),
+            "conflict_type_labels": torch.tensor(item["conflict_type_labels"], dtype=torch.float),
+            "severity": torch.tensor(item["severity"], dtype=torch.float),
+            "speaker_id": item["speaker_id"],
+            "gender": item["gender"],
+            "text": item["text"],
+            "utterance_id": Path(item["wav_path"]).stem if item["wav_path"] is not None else f"case_{idx}",
+            "word_timestamps": word_timestamps,
+            "token_word_boundaries": token_word_boundaries,
+        }
+
+
+# ---------------------------------------------------------------------------
+# GoEmotions (text-only, for encoder pre-training)
+# ---------------------------------------------------------------------------
+
+
+class GoEmotionsDataset(Dataset):
+    """GoEmotions text-only dataset for encoder pre-training.
+
+    No audio — returns dummy zero audio. Used only for text encoder
+    pre-training to augment swap-objective data. All samples are
+    non-conflict (conflict_binary=0).
+
+    Uses: https://huggingface.co/datasets/go_emotions
+    """
+
+    def __init__(
+        self,
+        tokenizer_name: str = "microsoft/deberta-v3-large",
+        split: str = "train",
+        max_samples: Optional[int] = None,
+    ):
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+        self.split = split
+        self.items = self._load_items(max_samples)
+        logger.info(f"[GoEmotions] {split}: {len(self.items)} utterances")
+
+    def _load_items(self, max_samples: Optional[int]) -> List[Dict]:
+        try:
+            from datasets import load_dataset
+            ds = load_dataset("go_emotions", split=self.split)
+        except Exception as e:
+            logger.warning(f"[GoEmotions] Failed to load dataset: {e}")
+            return []
+
+        items = []
+        for i, example in enumerate(ds):
+            if max_samples is not None and i >= max_samples:
+                break
+            text = example.get("text", "").strip()  # type: ignore[attr-defined]
+            if not text:
+                continue
+            items.append({
+                "text": text,
+            })
+        return items
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        item = self.items[idx]
+        dummy_audio = torch.zeros(SAMPLE_RATE)  # 1 second of silence
+        input_ids, attention_mask = tokenize(item["text"], self.tokenizer)
+        return {
+            "audio": dummy_audio,
+            "audio_np": np.zeros(SAMPLE_RATE, dtype=np.float32),
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "conflict_binary": torch.tensor(0, dtype=torch.long),
+            "conflict_type_labels": torch.tensor([0, 0, 0], dtype=torch.float),
+            "severity": torch.tensor(0.0, dtype=torch.float),
+            "speaker_id": f"goemotions_{idx}",
+            "gender": None,
+            "text": item["text"],
+            "utterance_id": f"goemotions_{idx}",
+        }
+
+
+# ---------------------------------------------------------------------------
+# Collate function
+# ---------------------------------------------------------------------------
+
+def _collate_core(
+    batch: List[Dict[str, Any]],
+    augmentor: Any = None,
+    prosody_lookup: Optional[Dict[str, torch.Tensor]] = None,
+) -> Dict[str, Any]:
+    """Pad variable-length audio; optionally augment; look up prosody z-scores.
+
+    Args:
+        batch: List of per-sample dicts from the dataset.
+        augmentor: An ``AudioAugmentor`` instance (or None to skip augmentation).
+        prosody_lookup: Pre-computed prosody z-scores dict mapping
+            ``{utterance_id: (3,) tensor}``, keyed by audio file stem.
+            Generated offline by ``scripts/compute_prosody_stats.py``.
+            If None, z-scores default to zeros.
+    """
+    if augmentor is not None and augmentor.available:
+        for b in batch:
+            aug_np = augmentor(b["audio_np"])
+            b["audio_np"] = aug_np
+            b["audio"] = torch.tensor(aug_np, dtype=torch.float32)
+
+    max_len = max(b["audio"].shape[0] for b in batch)
+    audio_padded = torch.zeros(len(batch), max_len)
+    audio_attention_mask = torch.zeros(len(batch), max_len, dtype=torch.bool)
+    for i, b in enumerate(batch):
+        t = b["audio"].shape[0]
+        audio_padded[i, :t] = b["audio"]
+        audio_attention_mask[i, :t] = True
+
+    # Look up or default prosody z-scores
+    # Keys match utterance_id from each dataset's __getitem__ (audio file stem).
+    # Generated by scripts/compute_prosody_stats.py. Falls back to zeros if not found.
+    prosody_z = torch.zeros(len(batch), 3)
+    if prosody_lookup is not None:
+        for i, b in enumerate(batch):
+            uid = b.get("utterance_id")
+            if uid is not None and uid in prosody_lookup:
+                prosody_z[i] = prosody_lookup[uid]
+
+    speaker_ids = [b["speaker_id"] for b in batch]
+    genders = [b.get("gender") for b in batch]
+
+    # Conversation context for temporal / cross-attn modules
+    conversation_ids = [
+        b.get("conversation_id", b.get("utterance_id", f"single_{i}"))
+        for i, b in enumerate(batch)
+    ]
+    turn_indices = [b.get("turn_index", 0) for b in batch]
+
+    # Word-level divergence: MFA timestamps + token-word boundaries.
+    # Loaded inline by each dataset's __getitem__ when textgrid_root is set.
+    # Samples without word features get empty lists to preserve batch alignment.
+    word_timestamps_raw = [b.get("word_timestamps") for b in batch]
+    token_word_boundaries_raw = [b.get("token_word_boundaries") for b in batch]
+    has_word_feats = any(x is not None for x in word_timestamps_raw)
+    if has_word_feats:
+        word_timestamps = [x if x is not None else [] for x in word_timestamps_raw]
+        token_word_boundaries = [x if x is not None else [] for x in token_word_boundaries_raw]
+    else:
+        word_timestamps = None
+        token_word_boundaries = None
+
+    return {
+        "audio": audio_padded,
+        "audio_attention_mask": audio_attention_mask,
+        "input_ids": torch.stack([b["input_ids"] for b in batch]),
+        "attention_mask": torch.stack([b["attention_mask"] for b in batch]),
+        "prosody_z": prosody_z,
+        "conflict_binary": torch.stack([b["conflict_binary"] for b in batch]).float(),
+        "conflict_type_labels": torch.stack([b["conflict_type_labels"] for b in batch]),
+        "severity": torch.stack([b["severity"] for b in batch]).unsqueeze(-1),
+        "speaker_ids": speaker_ids,
+        "genders": genders,
+        "conversation_ids": conversation_ids,
+        "turn_indices": turn_indices,
+        "word_timestamps": word_timestamps,
+        "token_word_boundaries": token_word_boundaries,
+    }
+
+
+def make_collate_fn(
+    augmentor: Any = None,
+    prosody_lookup: Optional[Dict[str, torch.Tensor]] = None,
+):
+    """Factory: returns a collate_fn with augmentation baked in via closure.
+
+    Usage::
+
+        from data.augmentation import AudioAugmentor
+        train_collate = make_collate_fn(augmentor=AudioAugmentor())
+        val_collate   = make_collate_fn()  # no augmentation
+    """
+    def _collate(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
+        return _collate_core(batch, augmentor=augmentor, prosody_lookup=prosody_lookup)
+    return _collate
+
+
+# Backwards-compatible default (no augmentation)
+def conflictnet_collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Default collate function without augmentation."""
+    return _collate_core(batch, augmentor=None)
+

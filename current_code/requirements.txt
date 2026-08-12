@@ -1,0 +1,32 @@
+torch>=2.1
+torchaudio>=2.1
+transformers>=4.36
+datasets>=2.16
+peft>=0.7
+speechbrain>=1.0
+captum>=0.7
+fairlearn>=0.9
+librosa>=0.10
+praat-parselmouth>=0.4
+scikit-learn>=1.3
+evaluate
+hydra-core>=1.3
+omegaconf
+wandb
+audiomentations>=0.34
+funasr  # Emotion2Vec backend (optional — falls back to wav2vec2 if absent)
+safetensors>=0.4  # secure, pickle-free tensor serialization
+pytest>=7.0  # test suite
+
+# Dev / CI
+ruff>=0.5
+
+# Serving (Phase 3)
+fastapi>=0.109
+uvicorn[standard]>=0.27
+pydantic>=2.5
+python-multipart>=0.0.9
+
+# ONNX export (optional)
+onnx>=1.15
+onnxruntime>=1.17

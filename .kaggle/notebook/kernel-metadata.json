@@ -1,0 +1,17 @@
+{
+  "id": "kiba6040/conflictnet-training-t4",
+  "title": "ConflictNet Training T4",
+  "code_file": "train_conflictnet.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "dataset_sources": [
+    "ejlok1/cremad"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

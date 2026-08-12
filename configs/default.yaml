@@ -1,0 +1,76 @@
+# Model
+audio_encoder: emotion2vec  # emotion2vec | wavlm | wav2vec2
+text_encoder: deberta-v3-large
+embed_dim: 256
+encoder_dim: 768
+
+# Speaker Normalization
+speaker_norm:
+  enabled: true
+  model: speechbrain/spkrec-ecapa-voxceleb
+  cold_start_clusters: 20
+  min_reference_utts: 5
+
+# Temporal Context
+temporal:
+  enabled: true
+  n_turns: 8
+  n_layers: 2
+  n_heads: 4
+  dropout: 0.1
+
+# Cross-Attention Injection (Gap 2): temporal context attends into audio+text
+cross_attn:
+  enabled: true
+
+# Baseline Subtract (Gap 4): prosody deviation from neutral centroid
+baseline_subtract:
+  enabled: true
+
+# Speaker-Adaptive Threshold (Gap 3): per-sample threshold from speaker features
+speaker_adaptive_threshold:
+  enabled: true
+
+# Classifier
+classifier:
+  type: multi_label_sigmoid  # not softmax
+  n_classes: 6  # anger, disgust, fear, happiness, neutral, sadness (CREMA-D 6 emotions)
+  severity_head: true
+  hidden_dims: [512, 256]
+
+# Training
+training:
+  amp: true
+  compile: true
+  batch_size: 32
+  lr: 2e-5
+  epochs: 30
+  warmup_steps: 500
+  curriculum:
+    enabled: true
+    warmup_epochs: 5
+  lora:
+    enabled: true
+    r: 16
+    alpha: 32
+  gradient_accumulation_steps: 1
+  early_stop_patience: 10
+  loss_balancing: uncertainty  # kendall2018
+
+# Data
+data:
+  train_datasets: [iemocap, crema_d, mustard_pp]
+  eval_datasets: [case2026, mustard_pp, meld]
+  augmentation:
+    speed_perturb: [0.9, 1.0, 1.1]
+    spec_augment: true
+    noise_augment: true  # MUSAN
+  sample_rate: 16000
+  max_audio_len: 10.0  # seconds
+  max_text_len: 512
+
+# Evaluation
+eval:
+  fairness: true
+  latency_benchmark: true
+  llm_baseline: false  # requires API key

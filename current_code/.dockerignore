@@ -1,0 +1,16 @@
+.git/
+.gitignore
+.github/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.pyc
+
+paper/
+pretrained_models/
+tests/
+
+AUDIT_FINDINGS.md
+ARCHITECTURE.md
+README.md
+pyrightconfig.json

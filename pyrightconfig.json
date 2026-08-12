@@ -1,0 +1,15 @@
+{
+  "pythonVersion": "3.10",
+  "pythonPlatform": "Darwin",
+  "typeCheckingMode": "basic",
+  "reportMissingImports": "none",
+  "reportMissingModuleSource": "none",
+  "reportPrivateImportUsage": "none",
+  "useLibraryCodeForTypes": true,
+  "venvPath": "/Users/shashwat/miniforge3/envs",
+  "venv": "conflictnet",
+  "exclude": [
+    "StarGANv2-VC/**",
+    "pretrained_models/**"
+  ]
+}

@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Environments
+.env
+.venv
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data
+*.wav
+*.mp3
+*.flac
+*.json.zscores
+
+# Models / checkpoints
+checkpoints/
+pretrained_models/
+*.pt
+*.pth
+*.safetensors
+
+# Results
+results/
+benchmark_results/
+calibration_results/
+ood_results/
+
+# Logs
+*.log
+wandb/
+
+# Kaggle dataset build artifacts
+.kaggle/dataset/conflictnet/
+.kaggle/dataset/__pycache__/
+
+# Download artifacts
+data/mustard/audio/
+
+# Kaggle build artifacts (keep metadata/notebook source)
+.kaggle/dataset/conflictnet-code/
+.kaggle/dataset/*.zip
