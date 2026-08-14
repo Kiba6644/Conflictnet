@@ -94,7 +94,7 @@ class ConflictNetTrainer:
                 # cryptic "inconsistent params" error that is hard to diagnose.
                 n_trainable_tensors = torch.tensor(
                     [sum(1 for p in self.model.parameters() if p.requires_grad)],
-                    device=self.device,
+                    device=device,
                 )
                 world_size = torch.distributed.get_world_size()
                 gathered = [torch.zeros_like(n_trainable_tensors) for _ in range(world_size)]
