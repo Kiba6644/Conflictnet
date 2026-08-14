@@ -351,26 +351,35 @@ class SpeakerNormalizer(nn.Module):
             min_ref_utts=min_ref_utts,
         )
 
-        # Eagerly load speaker model during init (before DDP wrapping) to prevent DDP deadlock
+        # IMPORTANT: Store _spk_model via __dict__ directly to PREVENT nn.Module from
+        # registering ECAPA-TDNN as a tracked submodule. ECAPA is frozen (no gradients)
+        # so DDP must NOT sync its weights — if it tries, the two ranks can diverge
+        # during the concurrent HuggingFace file download and crash with a param-count mismatch.
+        self.__dict__['_spk_model'] = None
+
+        # Eagerly load speaker model during init (before DDP wrapping)
         self._load_spk_model()
 
     def _load_spk_model(self):
-        if self._spk_model is None:
+        if self.__dict__.get('_spk_model') is None:
             try:
                 from speechbrain.inference.speaker import EncoderClassifier  # type: ignore
-                self._spk_model = EncoderClassifier.from_hparams(
+                model = EncoderClassifier.from_hparams(
                     source=self._model_source,
                     savedir=f"pretrained_models/{self._model_source.replace('/', '_')}",
                 )
+                # Store via __dict__ so PyTorch's nn.Module.__setattr__ never sees it
+                # and never registers it as a tracked submodule (avoids DDP param-count mismatch)
+                self.__dict__['_spk_model'] = model
                 logger.info(f"[SpeakerNorm] Loaded ECAPA-TDNN from {self._model_source}")
             except Exception as e:
                 logger.warning(f"[SpeakerNorm] SpeechBrain unavailable ({e}) — speaker embedding disabled")
-                self._spk_model = "disabled"
+                self.__dict__['_spk_model'] = "disabled"
 
     def _get_spk_model(self):
-        if self._spk_model is None:
+        if self.__dict__.get('_spk_model') is None:
             self._load_spk_model()
-        return self._spk_model
+        return self.__dict__['_spk_model']
 
     # ------------------------------------------------------------------
     # Embedding extraction
