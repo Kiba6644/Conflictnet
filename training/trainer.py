@@ -87,6 +87,27 @@ class ConflictNetTrainer:
             local_rank = int(os.environ.get("LOCAL_RANK", -1))
             if local_rank != -1 and torch.distributed.is_initialized():
                 logger.info(f"Using DistributedDataParallel on GPU {local_rank}.")
+
+                # Fail fast if ranks built different models (e.g. one rank hit a
+                # fallback encoder because a HuggingFace/SpeechBrain download raced
+                # across torchrun workers). Otherwise DDP crashes deep inside with a
+                # cryptic "inconsistent params" error that is hard to diagnose.
+                n_trainable_tensors = torch.tensor(
+                    [sum(1 for p in self.model.parameters() if p.requires_grad)],
+                    device=self.device,
+                )
+                world_size = torch.distributed.get_world_size()
+                gathered = [torch.zeros_like(n_trainable_tensors) for _ in range(world_size)]
+                torch.distributed.all_gather(gathered, n_trainable_tensors)
+                counts = [int(t.item()) for t in gathered]
+                if any(c != counts[0] for c in counts):
+                    raise RuntimeError(
+                        f"Ranks built different models (trainable tensor counts: {counts}). "
+                        "A HuggingFace/SpeechBrain download likely raced across torchrun "
+                        "workers and one rank fell back to a different encoder. Warm up all "
+                        "pretrained models in a single process before launching training."
+                    )
+
                 self.model = nn.parallel.DistributedDataParallel(
                     self.model,
                     device_ids=[local_rank],
