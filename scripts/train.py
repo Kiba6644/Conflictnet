@@ -21,6 +21,9 @@ from pathlib import Path
 # Fix for macOS OpenMP multiple initialization error
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
+# Fix for DeBERTa v2 "fabs" TorchScript compilation bug
+os.environ["PYTORCH_JIT"] = "0"
+
 import torch
 from torch.utils.data import DataLoader, ConcatDataset
 import os
