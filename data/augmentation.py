@@ -46,7 +46,7 @@ class AudioAugmentor:
     def __init__(
         self,
         sample_rate: int = 16000,
-        speed_perturb: bool = True,
+        speed_perturb: bool = False,  # Disabled by default due to severe CPU bottleneck
         additive_noise: bool = True,
         musan_path: Optional[str] = None,
         pitch_shift: bool = False,
