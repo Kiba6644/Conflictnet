@@ -39,6 +39,7 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser(description="Train ConflictNet v2")
     p.add_argument("--iemocap_root", type=str, default=None)
     p.add_argument("--mustard_root", type=str, default=None)
+    p.add_argument("--mustard_wav_dir", type=str, default="utterances_final", help="Path to MUStARD wav files")
     p.add_argument("--cremad_root", type=str, default=None, help="CREMA-D dataset root")
     p.add_argument("--meld_root", type=str, default=None, help="MELD dataset root")
     p.add_argument("--musan_path", type=str, default=None, help="MUSAN corpus for noise augmentation")
@@ -146,8 +147,22 @@ def main():
         val_datasets.append(IEMOCAPDataset(args.iemocap_root, sessions=[5]))
 
     if args.mustard_root:
-        train_datasets.append(MUStARDDataset(args.mustard_root, split="train"))
-        val_datasets.append(MUStARDDataset(args.mustard_root, split="val"))
+        mustard_kwargs = {}
+        if args.tokenizer_path:
+            mustard_kwargs["tokenizer_name"] = args.tokenizer_path
+            
+        train_datasets.append(MUStARDDataset(
+            root=args.mustard_root,
+            wav_dir=args.mustard_wav_dir,
+            split="train",
+            **mustard_kwargs
+        ))
+        val_datasets.append(MUStARDDataset(
+            root=args.mustard_root,
+            wav_dir=args.mustard_wav_dir,
+            split="val",
+            **mustard_kwargs
+        ))
 
     if args.cremad_root:
         tok_kwargs = {"tokenizer_name": args.tokenizer_path} if args.tokenizer_path else {}
