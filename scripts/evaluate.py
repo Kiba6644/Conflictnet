@@ -25,6 +25,10 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, ConcatDataset
 
+# Fix for DeBERTa v2 "fabs" TorchScript compilation bug
+os.environ["PYTORCH_JIT"] = "0"
+
+
 # Add project root to sys.path so 'data', 'models' etc. can be imported
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -37,6 +41,7 @@ def parse_args():
     p.add_argument("--checkpoint", type=str, required=True)
     p.add_argument("--iemocap_root", type=str, default=None)
     p.add_argument("--mustard_root", type=str, default=None)
+    p.add_argument("--mustard_wav_dir", type=str, default="utterances_final", help="Path to MUStARD wav files")
     p.add_argument("--case_root", type=str, default=None, help="CASE 2026 benchmark root")
     p.add_argument("--batch_size", type=int, default=16)
     p.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
@@ -95,7 +100,11 @@ def main():
     if args.iemocap_root:
         eval_datasets.append(IEMOCAPDataset(args.iemocap_root, sessions=[5]))
     if args.mustard_root:
-        eval_datasets.append(MUStARDDataset(args.mustard_root, split="val"))
+        eval_datasets.append(MUStARDDataset(
+            root=args.mustard_root, 
+            wav_dir=args.mustard_wav_dir, 
+            split="val"
+        ))
     if args.case_root:
         eval_datasets.append(CASEDataset(args.case_root, split="val"))
 
