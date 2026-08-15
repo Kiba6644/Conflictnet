@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Evaluate trained ConflictNet checkpoint on CREMA-D validation split."""
 
+import os
 import sys
 import time
 from pathlib import Path
+
+os.environ["PYTORCH_JIT"] = "0"
+
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
