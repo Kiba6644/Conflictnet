@@ -20,6 +20,8 @@ from pathlib import Path
 
 # Fix for macOS OpenMP multiple initialization error
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+# Disable TorchScript JIT to prevent overloaded fabs() compilation errors in DeBERTa
+os.environ["PYTORCH_JIT"] = "0"
 
 import numpy as np
 import torch
