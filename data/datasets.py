@@ -367,7 +367,7 @@ class MUStARDDataset(Dataset):
     def __init__(
         self,
         root: str,
-        json_file: str = "mustard++_raw_data.json",
+        json_file: str = "mustard_raw_data.json",
         tokenizer_name: str = "microsoft/deberta-v3-large",
         split: str = "train",
         train_ratio: float = 0.8,
