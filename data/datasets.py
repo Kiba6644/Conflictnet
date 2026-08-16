@@ -409,8 +409,8 @@ class MUStARDDataset(Dataset):
             if s_dir.exists():
                 logger.info(f"[MUStARD++] Indexing media files in {s_dir}...")
                 try:
-                    for p in s_dir.rglob("*"):
-                        if p.is_file() and p.suffix.lower() in valid_exts:
+                    for ext in valid_exts:
+                        for p in s_dir.rglob(f"*{ext}"):
                             wav_index[p.stem] = p
                             wav_index[p.name] = p
                             if p.stem.endswith("_u"):

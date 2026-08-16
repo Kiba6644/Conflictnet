@@ -31,7 +31,16 @@ import os
 # Add project root to sys.path so 'data', 'models' etc. can be imported
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+class FlushHandler(logging.StreamHandler):
+    def emit(self, record):
+        super().emit(record)
+        self.flush()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    handlers=[FlushHandler(sys.stdout)],
+)
 logger = logging.getLogger(__name__)
 
 
