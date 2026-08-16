@@ -386,6 +386,13 @@ class ConflictNetTrainer:
 
             # Early stopping check
             val_f1 = val_metrics.get("val/f1_weighted", 0)
+            
+            # Synchronize val_f1 across all GPUs so early stopping triggers simultaneously
+            if torch.distributed.is_initialized():
+                val_f1_t = torch.tensor([val_f1], dtype=torch.float, device=self.device)
+                torch.distributed.all_reduce(val_f1_t, op=torch.distributed.ReduceOp.AVG)
+                val_f1 = val_f1_t.item()
+
             if val_f1 > self._best_val_f1:
                 self._best_val_f1 = val_f1
                 self._patience_counter = 0
