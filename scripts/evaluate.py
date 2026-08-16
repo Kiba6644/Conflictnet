@@ -43,6 +43,8 @@ def parse_args():
     p.add_argument("--mustard_root", type=str, default=None)
     p.add_argument("--mustard_wav_dir", type=str, default="utterances_final", help="Path to MUStARD wav files")
     p.add_argument("--case_root", type=str, default=None, help="CASE 2026 benchmark root")
+    p.add_argument("--audio_encoder", type=str, default="emotion2vec",
+                   choices=["emotion2vec", "wavlm", "wavlm_weighted", "wav2vec2"])
     p.add_argument("--batch_size", type=int, default=16)
     p.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--fairness", action="store_true", help="Run fairness audit")
@@ -70,7 +72,7 @@ def main():
 
     ckpt = load_checkpoint_state(checkpoint_path, device=args.device)
     model_state = extract_model_state(ckpt)
-    model = ConflictNet()
+    model = ConflictNet(audio_encoder_name=args.audio_encoder)
     model.load_state_dict(model_state, strict=False)
     model.to(args.device)
     model.eval()
