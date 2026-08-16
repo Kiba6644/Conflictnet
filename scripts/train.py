@@ -189,9 +189,9 @@ def main():
     val_set = ConcatDataset(val_datasets)
 
     # Dynamically determine num_workers to speed up data loading per GPU process
-    cpus = os.cpu_count() or 4
-    world_size = int(os.environ.get("WORLD_SIZE", 1))
-    optimal_workers = max(1, cpus // world_size)
+    # On Kaggle, /dev/shm limits cause silent deadlocks with persistent_workers.
+    # Set to 0 to run in the main thread and ensure stability.
+    optimal_workers = 0
     
     from torch.utils.data.distributed import DistributedSampler
     train_sampler = DistributedSampler(train_set) if local_rank != -1 else None
