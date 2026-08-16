@@ -405,16 +405,21 @@ class MUStARDDataset(Dataset):
                 search_dirs.append(kaggle_input)
             search_dirs.append(self.root)
 
+        import os
         for s_dir in search_dirs:
             if s_dir.exists():
                 logger.info(f"[MUStARD++] Indexing media files in {s_dir}...")
                 try:
-                    for ext in valid_exts:
-                        for p in s_dir.rglob(f"*{ext}"):
-                            wav_index[p.stem] = p
-                            wav_index[p.name] = p
-                            if p.stem.endswith("_u"):
-                                wav_index[p.stem[:-2]] = p
+                    for root, dirs, files in os.walk(str(s_dir)):
+                        if ".git" in dirs:
+                            dirs.remove(".git")  # Skip massive git history
+                        for f in files:
+                            if f.lower().endswith(tuple(valid_exts)):
+                                p = Path(root) / f
+                                wav_index[p.stem] = p
+                                wav_index[p.name] = p
+                                if p.stem.endswith("_u"):
+                                    wav_index[p.stem[:-2]] = p
                 except Exception as e:
                     logger.warning(f"[MUStARD++] Error scanning {s_dir}: {e}")
                 if wav_index:
