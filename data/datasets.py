@@ -378,19 +378,28 @@ class MUStARDDataset(Dataset):
         logger.info(f"[MUStARD++] Searching for wavs in {wav_search_root} with pattern {self.wav_pattern}")
 
         # Collect all samples with speaker info
+        # Index all audio files once to avoid thousand+ disk traversals on Kaggle read-only mounts
+        wav_index: Dict[str, Path] = {}
+        if wav_search_root.exists():
+            ext = self.wav_pattern.lstrip("*") if self.wav_pattern.startswith("*") else ".wav"
+            for p in wav_search_root.rglob(f"*{ext}"):
+                wav_index[p.stem] = p
+                wav_index[p.name] = p
+
         all_samples = []
         for key, sample in data.items():
-            wav_candidates = list(wav_search_root.rglob(f"{key}*{self.wav_pattern.lstrip('*') if self.wav_pattern.startswith('*') else ''}"))
-            if not wav_candidates:
-                wav_candidates = list(wav_search_root.rglob(f"**/{key}{self.wav_pattern.lstrip('*')}"))
-            if not wav_candidates:
-                wav_candidates = list(wav_search_root.rglob(self.wav_pattern))
-                wav_candidates = [p for p in wav_candidates if key in p.stem]
-            if not wav_candidates:
+            wav_path = wav_index.get(key)
+            if wav_path is None:
+                # Fuzzy fallback matching on stems
+                for stem, p in wav_index.items():
+                    if key in stem:
+                        wav_path = p
+                        break
+            if wav_path is None:
                 logger.warning(f"[MUStARD++] No wav found for key={key}, searched in {wav_search_root}")
                 continue
             all_samples.append({
-                "wav_path": str(wav_candidates[0]),
+                "wav_path": str(wav_path),
                 "text": sample.get("utterance", ""),
                 "sarcasm": int(sample.get("sarcasm", 0)),
                 "speaker_id": sample.get("speaker", "unknown"),
