@@ -56,7 +56,24 @@ CONFLICT_EMOTIONS = {"ang", "fru"}  # used for binary conflict label in IEMOCAP
 
 def load_audio(path: str, target_sr: int = SAMPLE_RATE, max_len: float = MAX_AUDIO_LEN) -> torch.Tensor:
     """Load and resample audio file to target_sr, truncate to max_len seconds."""
-    waveform, sr = torchaudio.load(path)
+    try:
+        waveform, sr = torchaudio.load(path)
+    except Exception:
+        try:
+            import soundfile as sf
+            data, sr = sf.read(path)
+            waveform = torch.from_numpy(data).float()
+            if waveform.ndim == 1:
+                waveform = waveform.unsqueeze(0)
+            else:
+                waveform = waveform.t()
+        except Exception as e:
+            logger.warning(f"Failed to load audio from {path}: {e}, returning dummy audio tensor")
+            waveform = torch.zeros(1, int(target_sr * max_len))
+            sr = target_sr
+
+    if waveform.ndim == 1:
+        waveform = waveform.unsqueeze(0)
     if waveform.shape[0] > 1:
         waveform = waveform.mean(dim=0, keepdim=True)  # stereo → mono
     if sr != target_sr:
@@ -377,22 +394,47 @@ class MUStARDDataset(Dataset):
         wav_search_root = self.root / self.wav_dir if not self.wav_dir.is_absolute() else self.wav_dir
         logger.info(f"[MUStARD++] Searching for wavs in {wav_search_root} with pattern {self.wav_pattern}")
 
-        # Collect all samples with speaker info
-        # Index all audio files once to avoid thousand+ disk traversals on Kaggle read-only mounts
+        # Index all audio/video files once to avoid thousand+ disk traversals on Kaggle read-only mounts
         wav_index: Dict[str, Path] = {}
-        if wav_search_root.exists():
-            ext = self.wav_pattern.lstrip("*") if self.wav_pattern.startswith("*") else ".wav"
-            for p in wav_search_root.rglob(f"*{ext}"):
-                wav_index[p.stem] = p
-                wav_index[p.name] = p
+        valid_exts = {".wav", ".mp4", ".mkv", ".avi", ".mp3", ".flac", ".m4a", ".aac"}
+        
+        search_dirs = [wav_search_root]
+        if not wav_search_root.exists():
+            kaggle_input = Path("/kaggle/input")
+            if kaggle_input.exists():
+                search_dirs.append(kaggle_input)
+            search_dirs.append(self.root)
+
+        for s_dir in search_dirs:
+            if s_dir.exists():
+                logger.info(f"[MUStARD++] Indexing media files in {s_dir}...")
+                try:
+                    for p in s_dir.rglob("*"):
+                        if p.is_file() and p.suffix.lower() in valid_exts:
+                            wav_index[p.stem] = p
+                            wav_index[p.name] = p
+                            if p.stem.endswith("_u"):
+                                wav_index[p.stem[:-2]] = p
+                except Exception as e:
+                    logger.warning(f"[MUStARD++] Error scanning {s_dir}: {e}")
+                if wav_index:
+                    logger.info(f"[MUStARD++] Indexed {len(wav_index)} media files from {s_dir}")
+                    break
+
+        if not wav_index:
+            logger.warning(f"[MUStARD++] WARNING: 0 media files found in {search_dirs}! Dataset will be empty.")
 
         all_samples = []
         for key, sample in data.items():
             wav_path = wav_index.get(key)
             if wav_path is None:
+                # Key without '_u' or with '_u' suffix handling
+                alt_key = key[:-2] if key.endswith("_u") else f"{key}_u"
+                wav_path = wav_index.get(alt_key)
+            if wav_path is None:
                 # Fuzzy fallback matching on stems
                 for stem, p in wav_index.items():
-                    if key in stem:
+                    if key in stem or stem in key:
                         wav_path = p
                         break
             if wav_path is None:
