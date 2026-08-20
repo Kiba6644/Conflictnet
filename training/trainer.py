@@ -277,15 +277,16 @@ class ConflictNetTrainer:
             total_loss += loss.item() * grad_accum_steps
             n_batches += 1
 
-            if self.global_step % 50 == 0 and self.global_step > 0:
-                metrics = {"train/loss": loss.item() * grad_accum_steps, "train/lr": self.scheduler.get_last_lr()[0]}
+            if self.global_step % 10 == 0 and self.global_step > 0:
+                metrics = {
+                    "loss": loss.item() * grad_accum_steps,
+                    "lr": self.scheduler.get_last_lr()[0],
+                }
                 if output.loss_breakdown:
                     for k, v in output.loss_breakdown.items():
-                        if isinstance(v, float):
-                            metrics[f"train/{k}"] = v
-                if self.use_wandb:
-                    import wandb  # type: ignore
-                    wandb.log(metrics, step=self.global_step)
+                        if isinstance(v, float) and k in ("bce_type", "bce_binary", "swap_loss", "severity"):
+                            metrics[k] = v
+                self._log(metrics, self.global_step)
 
         # Handle remaining gradients when epoch ends mid-accumulation
         if n_batches % grad_accum_steps != 0:
