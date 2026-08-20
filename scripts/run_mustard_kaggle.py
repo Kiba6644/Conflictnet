@@ -63,35 +63,85 @@ def run(cmd, **kwargs):
         raise subprocess.CalledProcessError(rc, cmd)
 
 
-def download_mustard_clips(clips_dir):
-    """Download and extract MUStARD raw video/audio clips from HuggingFace.
+def download_fast(url: str, output_path: Path) -> None:
+    """Fast multi-connection download using aria2c (16 parallel streams) or curl."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    has_aria2 = subprocess.run(["which", "aria2c"], capture_output=True).returncode == 0
+    if not has_aria2:
+        try:
+            print("Installing aria2 for ultra-fast multi-stream downloading...")
+            subprocess.run(["apt-get", "update", "-qq"], check=False)
+            subprocess.run(["apt-get", "install", "-y", "-qq", "aria2"], check=False)
+            has_aria2 = subprocess.run(["which", "aria2c"], capture_output=True).returncode == 0
+        except Exception:
+            has_aria2 = False
 
-    The zip contains the raw mp4 video clips. The dataset loader (MUStARDDataset)
-    can read audio directly from mp4 via torchaudio/soundfile, so no separate
-    audio extraction step is required.
-    """
-    # Check if already extracted -- look for any media file as a proxy
+    if has_aria2:
+        print(f"⚡ Downloading at high speed with aria2c (16 connections):\n{url}")
+        cmd = [
+            "aria2c",
+            "-x", "16",
+            "-s", "16",
+            "-j", "16",
+            "-k", "1M",
+            "--file-allocation=none",
+            "--summary-interval=2",
+            "--allow-overwrite=true",
+            "--auto-file-renaming=false",
+            "-d", str(output_path.parent),
+            "-o", output_path.name,
+            url,
+        ]
+        run(cmd)
+    else:
+        print(f"Downloading with curl: {url}")
+        cmd = ["curl", "-L", "--progress-bar", "-o", str(output_path), url]
+        run(cmd)
+
+
+def find_mustard_clips_dir(requested_dir: Path) -> Path:
+    """Find MUStARD clips if already present in requested_dir or /kaggle/input."""
+    if requested_dir.exists():
+        media_files = list(requested_dir.rglob("*.mp4")) + list(requested_dir.rglob("*.wav"))
+        if media_files:
+            return requested_dir
+
+    kaggle_input = Path("/kaggle/input")
+    if kaggle_input.exists():
+        media_files = list(kaggle_input.rglob("*.mp4")) + list(kaggle_input.rglob("*.wav"))
+        if media_files:
+            candidate = media_files[0].parent
+            print(f"[MUStARD] 🚀 Found {len(media_files)} clips in attached Kaggle input: {candidate} (0s load time)")
+            return candidate
+
+    return requested_dir
+
+
+def download_mustard_clips(clips_dir: Path) -> Path:
+    """Download and extract MUStARD raw video clips with multi-stream high speed."""
+    clips_dir = find_mustard_clips_dir(clips_dir)
     if clips_dir.exists():
         media_files = list(clips_dir.rglob("*.mp4")) + list(clips_dir.rglob("*.wav"))
         if media_files:
-            print(f"[MUStARD] Already extracted ({len(media_files)} clips) at {clips_dir}, skipping download.")
-            return
+            print(f"[MUStARD] Already available ({len(media_files)} clips) at {clips_dir}, skipping download.")
+            return clips_dir
 
     clips_dir.mkdir(parents=True, exist_ok=True)
     zip_path = clips_dir.parent / "mmsd.zip"
 
     url = "https://huggingface.co/datasets/MichiganNLP/MUStARD/resolve/main/mmsd_raw_data.zip"
-    print(f"[MUStARD] Downloading clips from {url} ...")
-    run(["wget", "-q", "--show-progress", "-O", str(zip_path), url])
+    download_fast(url, zip_path)
 
-    print("[MUStARD] Extracting ...")
+    print("[MUStARD] Extracting clips archive...")
     run(["unzip", "-q", "-o", str(zip_path), "-d", str(clips_dir)])
-    zip_path.unlink()
+    if zip_path.exists():
+        zip_path.unlink()
 
     media_files = list(clips_dir.rglob("*.mp4")) + list(clips_dir.rglob("*.wav"))
     if not media_files:
         raise RuntimeError(f"[MUStARD] No media files found after extraction in {clips_dir}")
-    print(f"[MUStARD] {len(media_files)} clips ready.")
+    print(f"[MUStARD] ✅ {len(media_files)} clips ready.")
+    return clips_dir
 
 
 def warmup_models(audio_encoder):
@@ -129,9 +179,11 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Step 1: Download MUStARD clips
+    # Step 1: Download / locate MUStARD clips
     if not args.skip_download:
-        download_mustard_clips(clips_dir)
+        clips_dir = download_mustard_clips(clips_dir)
+    else:
+        clips_dir = find_mustard_clips_dir(clips_dir)
 
     # Step 2: Warm up pretrained models (single-process, before torchrun)
     import torch

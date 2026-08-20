@@ -57,23 +57,75 @@ def run(cmd, **kwargs):
         raise subprocess.CalledProcessError(rc, cmd)
 
 
-def download_meld(meld_root):
-    """Download and extract MELD from the official HuggingFace mirror."""
+def download_fast(url: str, output_path: Path) -> None:
+    """Fast multi-connection download using aria2c (16 parallel streams) or curl."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    has_aria2 = subprocess.run(["which", "aria2c"], capture_output=True).returncode == 0
+    if not has_aria2:
+        try:
+            print("Installing aria2 for ultra-fast multi-stream downloading...")
+            subprocess.run(["apt-get", "update", "-qq"], check=False)
+            subprocess.run(["apt-get", "install", "-y", "-qq", "aria2"], check=False)
+            has_aria2 = subprocess.run(["which", "aria2c"], capture_output=True).returncode == 0
+        except Exception:
+            has_aria2 = False
+
+    if has_aria2:
+        print(f"⚡ Downloading at high speed with aria2c (16 connections):\n{url}")
+        cmd = [
+            "aria2c",
+            "-x", "16",
+            "-s", "16",
+            "-j", "16",
+            "-k", "1M",
+            "--file-allocation=none",
+            "--summary-interval=2",
+            "--allow-overwrite=true",
+            "--auto-file-renaming=false",
+            "-d", str(output_path.parent),
+            "-o", output_path.name,
+            url,
+        ]
+        run(cmd)
+    else:
+        print(f"Downloading with curl: {url}")
+        cmd = ["curl", "-L", "--progress-bar", "-o", str(output_path), url]
+        run(cmd)
+
+
+def find_meld_root(requested_root: Path) -> Path:
+    """Find MELD dataset if already extracted or mounted in /kaggle/input."""
+    if (requested_root / "train" / "train_sent_emo.csv").exists():
+        return requested_root
+
+    kaggle_input = Path("/kaggle/input")
+    if kaggle_input.exists():
+        for p in kaggle_input.rglob("train_sent_emo.csv"):
+            candidate = p.parent.parent
+            if (candidate / "dev" / "dev_sent_emo.csv").exists() or (candidate / "train" / "train_sent_emo.csv").exists():
+                print(f"[MELD] 🚀 Found attached Kaggle dataset at {candidate} (0s load time)")
+                return candidate
+
+    return requested_root
+
+
+def download_meld(meld_root: Path) -> Path:
+    """Download and extract MELD using high-speed multi-connection transfer."""
+    meld_root = find_meld_root(meld_root)
     if (meld_root / "train" / "train_sent_emo.csv").exists():
-        print(f"[MELD] Already extracted at {meld_root}, skipping download.")
-        return
+        print(f"[MELD] Dataset ready at {meld_root}, skipping download.")
+        return meld_root
 
     meld_root.mkdir(parents=True, exist_ok=True)
-    zip_path = meld_root / "MELD.Raw.tar.gz"
+    tar_path = meld_root.parent / "MELD.Raw.tar.gz"
 
-    # Primary source: MELD paper official release on Hugging Face
     url = "https://huggingface.co/datasets/declare-lab/MELD/resolve/main/MELD.Raw.tar.gz"
-    print(f"[MELD] Downloading from {url} ...")
-    run(["wget", "-q", "--show-progress", "-O", str(zip_path), url])
+    download_fast(url, tar_path)
 
-    print("[MELD] Extracting ...")
-    run(["tar", "-xzf", str(zip_path), "-C", str(meld_root), "--strip-components=1"])
-    zip_path.unlink()
+    print("[MELD] Extracting archive...")
+    run(["tar", "-xzf", str(tar_path), "-C", str(meld_root), "--strip-components=1"])
+    if tar_path.exists():
+        tar_path.unlink()
 
     # Verify expected structure
     for split, csv_name in [
@@ -84,7 +136,8 @@ def download_meld(meld_root):
         p = meld_root / split / csv_name
         if not p.exists():
             raise RuntimeError(f"[MELD] Expected file not found after extraction: {p}")
-    print("[MELD] Dataset ready.")
+    print("[MELD] ✅ Dataset ready.")
+    return meld_root
 
 
 def warmup_models(audio_encoder, no_word_divergence):
@@ -122,9 +175,11 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Step 1: Download MELD
+    # Step 1: Download / locate MELD
     if not args.skip_download:
-        download_meld(meld_root)
+        meld_root = download_meld(meld_root)
+    else:
+        meld_root = find_meld_root(meld_root)
 
     # Step 2: Warm up pretrained models (single-process, before torchrun)
     import torch
