@@ -697,12 +697,51 @@ class MELDDataset(Dataset):
     def _load_items(self) -> List[Dict]:
         split_map = {"train": "train", "val": "dev", "test": "test"}
         split_name = split_map.get(self.split, self.split)
-        csv_path = self.root / split_name / f"{split_name}_sent_emo.csv"
-        wav_dir = self.root / split_name / f"{split_name}_splits"
+        
+        # Look for CSV in standard or root locations
+        csv_candidates = [
+            self.root / split_name / f"{split_name}_sent_emo.csv",
+            self.root / f"{split_name}_sent_emo.csv",
+        ]
+        csv_path = None
+        for c in csv_candidates:
+            if c.exists():
+                csv_path = c
+                break
+        if csv_path is None:
+            # Fallback search
+            for p in self.root.rglob(f"{split_name}_sent_emo.csv"):
+                csv_path = p
+                break
 
-        if not csv_path.exists():
-            logger.warning(f"[MELD] CSV not found: {csv_path}")
+        if csv_path is None or not csv_path.exists():
+            logger.warning(f"[MELD] CSV not found in {self.root} for split {split_name}")
             return []
+
+        # Index all audio/video files (.wav, .mp4, etc.)
+        valid_exts = {".wav", ".mp4", ".flac", ".m4a", ".mp3", ".mkv", ".avi"}
+        media_index: Dict[str, Path] = {}
+        search_dirs = [
+            self.root / split_name / f"{split_name}_splits",
+            self.root / f"{split_name}_splits",
+            self.root / split_name,
+            self.root,
+        ]
+        for s_dir in search_dirs:
+            if s_dir.exists():
+                try:
+                    for root_d, dirs_d, files_d in os.walk(str(s_dir)):
+                        if ".git" in dirs_d:
+                            dirs_d.remove(".git")
+                        for f in files_d:
+                            if any(f.lower().endswith(ext) for ext in valid_exts):
+                                p = Path(root_d) / f
+                                media_index[p.stem] = p
+                                media_index[p.name] = p
+                except Exception as e:
+                    logger.warning(f"[MELD] Error scanning {s_dir}: {e}")
+                if media_index:
+                    break
 
         items = []
         with open(csv_path, "r", encoding="utf-8") as f:
@@ -740,8 +779,18 @@ class MELDDataset(Dataset):
                 emotion = row.get(field_map["emotion"], "neutral").lower()
                 speaker = row.get(field_map["speaker"], "unknown")
 
-                wav_path = wav_dir / f"dia{dia_id}_utt{utt_id}.wav"
-                if not wav_path.exists():
+                clip_key = f"dia{dia_id}_utt{utt_id}"
+                wav_path = media_index.get(clip_key)
+                if wav_path is None:
+                    # Try direct path checks
+                    direct_wav = self.root / split_name / f"{split_name}_splits" / f"{clip_key}.wav"
+                    direct_mp4 = self.root / split_name / f"{split_name}_splits" / f"{clip_key}.mp4"
+                    if direct_wav.exists():
+                        wav_path = direct_wav
+                    elif direct_mp4.exists():
+                        wav_path = direct_mp4
+
+                if wav_path is None:
                     continue
 
                 conflict = emotion in MELD_CONFLICT_EMOTIONS
