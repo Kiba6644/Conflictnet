@@ -38,9 +38,8 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 
-def run(cmd, **kwargs):
-    """Run a subprocess, streaming output live and raising on error."""
-    print("\n$ " + " ".join(str(c) for c in cmd) + "\n", flush=True)
+def run(cmd, silent=False, **kwargs):
+    """Run a subprocess cleanly, streaming output live unless silent."""
     proc = subprocess.Popen(
         [str(c) for c in cmd],
         stdout=subprocess.PIPE,
@@ -50,7 +49,8 @@ def run(cmd, **kwargs):
         **kwargs,
     )
     for line in iter(proc.stdout.readline, ""):
-        print(line, end="", flush=True)
+        if not silent:
+            print(line, end="", flush=True)
     proc.stdout.close()
     rc = proc.wait()
     if rc != 0:
@@ -58,20 +58,19 @@ def run(cmd, **kwargs):
 
 
 def download_fast(url: str, output_path: Path) -> None:
-    """Fast multi-connection download using aria2c (16 parallel streams) or curl."""
+    """Fast multi-connection download using aria2c (16 parallel streams) or curl quietly."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     has_aria2 = subprocess.run(["which", "aria2c"], capture_output=True).returncode == 0
     if not has_aria2:
         try:
-            print("Installing aria2 for ultra-fast multi-stream downloading...")
-            subprocess.run(["apt-get", "update", "-qq"], check=False)
-            subprocess.run(["apt-get", "install", "-y", "-qq", "aria2"], check=False)
+            subprocess.run(["apt-get", "update", "-qq"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            subprocess.run(["apt-get", "install", "-y", "-qq", "aria2"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
             has_aria2 = subprocess.run(["which", "aria2c"], capture_output=True).returncode == 0
         except Exception:
             has_aria2 = False
 
+    print("⚡ Fast downloading archive (16 parallel connections)...", flush=True)
     if has_aria2:
-        print(f"⚡ Downloading at high speed with aria2c (16 connections):\n{url}")
         cmd = [
             "aria2c",
             "-x", "16",
@@ -79,18 +78,19 @@ def download_fast(url: str, output_path: Path) -> None:
             "-j", "16",
             "-k", "1M",
             "--file-allocation=none",
-            "--summary-interval=2",
+            "--console-log-level=warn",
+            "--summary-interval=0",
+            "--quiet=true",
             "--allow-overwrite=true",
             "--auto-file-renaming=false",
             "-d", str(output_path.parent),
             "-o", output_path.name,
             url,
         ]
-        run(cmd)
+        run(cmd, silent=True)
     else:
-        print(f"Downloading with curl: {url}")
-        cmd = ["curl", "-L", "--progress-bar", "-o", str(output_path), url]
-        run(cmd)
+        cmd = ["curl", "-sL", "-o", str(output_path), url]
+        run(cmd, silent=True)
 
 
 def find_meld_root(requested_root: Path) -> Path:

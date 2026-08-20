@@ -277,13 +277,15 @@ class ConflictNetTrainer:
             total_loss += loss.item() * grad_accum_steps
             n_batches += 1
 
-            if self.global_step % 10 == 0 and self.global_step > 0:
+            if self.global_step % 50 == 0 and self.global_step > 0:
                 metrics = {"train/loss": loss.item() * grad_accum_steps, "train/lr": self.scheduler.get_last_lr()[0]}
                 if output.loss_breakdown:
                     for k, v in output.loss_breakdown.items():
                         if isinstance(v, float):
                             metrics[f"train/{k}"] = v
-                self._log(metrics, self.global_step)
+                if self.use_wandb:
+                    import wandb  # type: ignore
+                    wandb.log(metrics, step=self.global_step)
 
         # Handle remaining gradients when epoch ends mid-accumulation
         if n_batches % grad_accum_steps != 0:
@@ -367,27 +369,33 @@ class ConflictNetTrainer:
         for epoch in range(start_epoch, n_epochs):
             is_pretrain = epoch < pretrain_epochs
             phase = "pretrain" if is_pretrain else "finetune"
-            logger.info(f"[Epoch {epoch+1}/{n_epochs}] phase={phase}")
 
             train_metrics = self.train_epoch(epoch, pretraining=is_pretrain)
             val_metrics = self.evaluate()
 
             all_metrics = {**train_metrics, **val_metrics, "epoch": epoch + 1}
-            self._log(all_metrics, self.global_step)
+            if self.use_wandb:
+                import wandb  # type: ignore
+                wandb.log(all_metrics, step=self.global_step)
 
             # Save latest checkpoint (overwrites previous to save disk space)
             self._save_checkpoint(epoch, is_latest=True)
 
-            # Save best checkpoint
-            if val_metrics.get("val/f1_weighted", 0) > self.best_val_f1:
-                self.best_val_f1 = val_metrics["val/f1_weighted"]
+            val_f1 = val_metrics.get("val/f1_weighted", 0.0)
+            is_best = val_f1 > self.best_val_f1
+            if is_best:
+                self.best_val_f1 = val_f1
                 self._save_checkpoint(epoch, is_best=True)
-                logger.info(f"  ✓ New best val F1 = {self.best_val_f1:.4f}")
+
+            # Clean, compact 1-line epoch summary
+            tag = " ⭐ (New Best)" if is_best else ""
+            logger.info(
+                f"[Epoch {epoch+1:02d}/{n_epochs:02d}] {phase.upper():<8} | "
+                f"Train Loss: {train_metrics['loss']:.4f} | "
+                f"Val F1: {val_f1:.4f}{tag}"
+            )
 
             # Early stopping check
-            val_f1 = val_metrics.get("val/f1_weighted", 0)
-            
-            # Synchronize val_f1 across all GPUs so early stopping triggers simultaneously
             if torch.distributed.is_initialized():
                 val_f1_t = torch.tensor([val_f1], dtype=torch.float, device=self.device)
                 torch.distributed.all_reduce(val_f1_t, op=torch.distributed.ReduceOp.AVG)
@@ -399,10 +407,10 @@ class ConflictNetTrainer:
             else:
                 self._patience_counter += 1
                 if self._patience_counter >= early_stop_patience:
-                    logger.info("Early stopping triggered")
+                    logger.info(f"Early stopping triggered at epoch {epoch+1} (patience={early_stop_patience})")
                     break
 
-        logger.info(f"Training complete. Best val F1 = {self.best_val_f1:.4f}")
+        logger.info(f"✅ Training complete. Best val F1 = {self.best_val_f1:.4f}")
 
     @staticmethod
     def _get_git_info() -> Dict[str, str]:
