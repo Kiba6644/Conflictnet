@@ -45,6 +45,9 @@ def parse_args():
     p.add_argument("--mustard_root", type=str, default=None)
     p.add_argument("--mustard_wav_dir", type=str, default="utterances_final", help="Path to MUStARD wav files")
     p.add_argument("--case_root", type=str, default=None, help="CASE 2026 benchmark root")
+    p.add_argument("--meld_root", type=str, default=None, help="MELD dataset root for evaluation")
+    p.add_argument("--meld_max_samples", type=int, default=None,
+                   help="Cap MELD eval set to N samples (stratified); matches train-time setting")
     p.add_argument("--audio_encoder", type=str, default="emotion2vec",
                    choices=["emotion2vec", "wavlm", "wavlm_weighted", "wav2vec2"])
     p.add_argument("--batch_size", type=int, default=16)
@@ -98,7 +101,11 @@ def main():
                 logger.warning(f"[Prosody] failed to load {zscores_p}: {e}")
 
     # --- Build eval dataset ---
-    from data.datasets import IEMOCAPDataset, MUStARDDataset, CASEDataset, make_collate_fn
+    from data.datasets import IEMOCAPDataset, MUStARDDataset, MELDDataset, make_collate_fn
+    try:
+        from data.datasets import CASEDataset
+    except ImportError:
+        CASEDataset = None  # type: ignore
 
     eval_datasets = []
     if args.iemocap_root:
@@ -109,11 +116,15 @@ def main():
             wav_dir=args.mustard_wav_dir, 
             split="val"
         ))
-    if args.case_root:
+    if args.meld_root:
+        meld_kwargs = {"max_samples": args.meld_max_samples} if args.meld_max_samples else {}
+        # Evaluate on the held-out test split (MELD has an official test set)
+        eval_datasets.append(MELDDataset(args.meld_root, split="test", **meld_kwargs))
+    if args.case_root and CASEDataset is not None:
         eval_datasets.append(CASEDataset(args.case_root, split="val"))
 
     if not eval_datasets:
-        raise ValueError("Provide at least one of --iemocap_root, --mustard_root, or --case_root")
+        raise ValueError("Provide at least one of --iemocap_root, --mustard_root, --meld_root, or --case_root")
 
     eval_set = ConcatDataset(eval_datasets)
     pin = (args.device != "cpu")  # pin_memory only valid for CUDA

@@ -684,11 +684,13 @@ class MELDDataset(Dataset):
         tokenizer_name: str = "microsoft/deberta-v3-large",
         split: str = "train",
         textgrid_root: Optional[str] = None,
+        max_samples: Optional[int] = None,
     ):
         self.root = Path(root)
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
         self.split = split
         self.textgrid_root = textgrid_root
+        self.max_samples = max_samples
         self.items = self._load_items()
         logger.info(f"[MELD] {split}: {len(self.items)} utterances")
 
@@ -769,6 +771,23 @@ class MELDDataset(Dataset):
                     "speaker_id": f"meld_{speaker}",
                     "gender": None,
                 })
+        if self.max_samples is not None and len(items) > self.max_samples:
+            # Stratified subsample: preserve conflict/non-conflict ratio
+            rng = random.Random(42)
+            conflict_items = [x for x in items if x["conflict_binary"] == 1]
+            non_conflict_items = [x for x in items if x["conflict_binary"] == 0]
+            total = len(items)
+            n_conflict = round(self.max_samples * len(conflict_items) / total)
+            n_non_conflict = self.max_samples - n_conflict
+            rng.shuffle(conflict_items)
+            rng.shuffle(non_conflict_items)
+            items = conflict_items[:n_conflict] + non_conflict_items[:n_non_conflict]
+            rng.shuffle(items)
+            logger.info(
+                f"[MELD] {self.split}: subsampled to {len(items)} "
+                f"({n_conflict} conflict, {n_non_conflict} non-conflict) "
+                f"from {total} total (max_samples={self.max_samples})"
+            )
         return items
 
     def __len__(self) -> int:

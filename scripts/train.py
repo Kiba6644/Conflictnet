@@ -51,6 +51,8 @@ def parse_args(argv=None):
     p.add_argument("--mustard_wav_dir", type=str, default="utterances_final", help="Path to MUStARD wav files")
     p.add_argument("--cremad_root", type=str, default=None, help="CREMA-D dataset root")
     p.add_argument("--meld_root", type=str, default=None, help="MELD dataset root")
+    p.add_argument("--meld_max_samples", type=int, default=None,
+                   help="Cap MELD dataset to this many samples (stratified); set to 700 to match MUStARD scale")
     p.add_argument("--musan_path", type=str, default=None, help="MUSAN corpus for noise augmentation")
     p.add_argument("--output_dir", type=str, default="checkpoints")
     p.add_argument("--audio_encoder", type=str, default="emotion2vec",
@@ -179,8 +181,11 @@ def main():
         val_datasets.append(CREMADDataset(args.cremad_root, split="val", **tok_kwargs))
 
     if args.meld_root:
-        train_datasets.append(MELDDataset(args.meld_root, split="train"))
-        val_datasets.append(MELDDataset(args.meld_root, split="val"))
+        meld_kwargs = {"max_samples": args.meld_max_samples} if args.meld_max_samples else {}
+        if args.tokenizer_path:
+            meld_kwargs["tokenizer_name"] = args.tokenizer_path
+        train_datasets.append(MELDDataset(args.meld_root, split="train", **meld_kwargs))
+        val_datasets.append(MELDDataset(args.meld_root, split="val", **meld_kwargs))
 
     if not train_datasets:
         raise ValueError("Provide at least one of --iemocap_root, --mustard_root, --cremad_root, or --meld_root")
