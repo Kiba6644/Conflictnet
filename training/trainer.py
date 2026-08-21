@@ -185,7 +185,13 @@ class ConflictNetTrainer:
         if self.use_wandb:
             import wandb  # type: ignore
             wandb.log(metrics, step=step)
-        logger.info(f"[Step {step}] " + " | ".join(f"{k}={v:.4f}" for k, v in metrics.items()))
+        logger.info(
+            f"[Step {step}] "
+            + " | ".join(
+                f"{k}={v:.2e}" if k == "lr" else f"{k}={v:.4f}"
+                for k, v in metrics.items()
+            )
+        )
         sys.stdout.flush()
 
     def train_epoch(self, epoch: int, pretraining: bool = False) -> Dict[str, float]:
