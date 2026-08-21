@@ -384,14 +384,28 @@ class MUStARDDataset(Dataset):
         logger.info(f"[MUStARD++] {split}: {len(self.items)} utterances")
 
     def _load_items(self, json_file: str, split: str, train_ratio: float) -> List[Dict]:
-        json_path = self.root / json_file
-        if not json_path.exists():
-            logger.warning(f"[MUStARD++] JSON not found: {json_path}")
+        candidates = [
+            self.root / json_file,
+            self.root / "sarcasm_data.json",
+            self.root / "data" / "sarcasm_data.json",
+            self.root / "data" / "mustard_raw_data.json"
+        ]
+        json_path = None
+        for c in candidates:
+            if c.exists():
+                json_path = c
+                break
+                
+        if json_path is None:
+            logger.warning(f"[MUStARD++] JSON not found in {self.root}")
             return []
+            
         with open(json_path) as f:
             data = json.load(f)
 
         wav_search_root = self.root / self.wav_dir if not self.wav_dir.is_absolute() else self.wav_dir
+        if not wav_search_root.exists():
+            wav_search_root = self.root
         logger.info(f"[MUStARD++] Searching for wavs in {wav_search_root} with pattern {self.wav_pattern}")
 
         # Index all audio/video files once to avoid thousand+ disk traversals on Kaggle read-only mounts
