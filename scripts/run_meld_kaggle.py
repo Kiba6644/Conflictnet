@@ -175,6 +175,15 @@ def find_meld_root(requested_root: Path, explicit_mount: Optional[str] = None) -
                 print(f"[MELD] 📦 Unpacking {tar_name} into {target_root} ...", flush=True)
                 run(["tar", "-xzf", str(tar_file), "-C", str(target_root)])
 
+        # Copy pre-extracted audio split directories (train/, dev/, test/) if they exist
+        # as directories rather than tar archives (some Kaggle datasets ship pre-extracted).
+        for split in ["train", "dev", "test"]:
+            src_split = mounted_path / split
+            dst_split = target_root / split
+            if src_split.exists() and src_split.is_dir() and not dst_split.exists():
+                print(f"[MELD] 📂 Copying pre-extracted {split}/ ({len(list(src_split.rglob('*')))} files) ...", flush=True)
+                shutil.copytree(str(src_split), str(dst_split))
+
         # Ensure CSVs are at target_root (search subdirs/parent or fetch 1MB CSV directly)
         for csv_name in ["train_sent_emo.csv", "dev_sent_emo.csv", "test_sent_emo.csv"]:
             dst = target_root / csv_name
