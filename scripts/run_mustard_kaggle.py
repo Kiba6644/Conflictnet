@@ -30,6 +30,10 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["PYTHONUNBUFFERED"] = "1"
 os.environ["WANDB_DISABLED"] = "true"
 os.environ["WANDB_SILENT"] = "true"
+os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+os.environ["TQDM_DISABLE"] = "1"
+os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # Point HF / SpeechBrain caches to /tmp so the working dir stays clean
 HF_CACHE = "/tmp/hf_cache"

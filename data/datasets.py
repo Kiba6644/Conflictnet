@@ -751,22 +751,19 @@ class MELDDataset(Dataset):
                 field_map[key] = found
 
             for row in reader:
-                dia_id = row.get(field_map["dialogue_id"], "")
-                utt_id = row.get(field_map["utterance_id"], "")
-                text = row.get(field_map["utterance"], "")
-                emotion = row.get(field_map["emotion"], "neutral").lower()
-                speaker = row.get(field_map["speaker"], "unknown")
+                dia_id = str(row.get(field_map["dialogue_id"], "")).strip()
+                utt_id = str(row.get(field_map["utterance_id"], "")).strip()
+                text = str(row.get(field_map["utterance"], "")).strip()
+                emotion = str(row.get(field_map["emotion"], "neutral")).strip().lower()
+                speaker = str(row.get(field_map["speaker"], "unknown")).strip()
 
                 clip_key = f"dia{dia_id}_utt{utt_id}"
                 wav_path = media_index.get(clip_key)
                 if wav_path is None:
-                    # Try direct path checks
-                    direct_wav = self.root / split_name / f"{split_name}_splits" / f"{clip_key}.wav"
-                    direct_mp4 = self.root / split_name / f"{split_name}_splits" / f"{clip_key}.mp4"
-                    if direct_wav.exists():
-                        wav_path = direct_wav
-                    elif direct_mp4.exists():
-                        wav_path = direct_mp4
+                    wav_path = media_index.get(f"{clip_key}.mp4") or media_index.get(f"{clip_key}.wav")
+                if wav_path is None and dia_id.isdigit() and utt_id.isdigit():
+                    num_key = f"dia{int(dia_id)}_utt{int(utt_id)}"
+                    wav_path = media_index.get(num_key) or media_index.get(f"{num_key}.mp4")
 
                 if wav_path is None:
                     continue

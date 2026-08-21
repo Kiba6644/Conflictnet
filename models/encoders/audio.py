@@ -18,6 +18,13 @@ import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
 
+try:
+    from transformers.utils import logging as tf_logging
+    tf_logging.set_verbosity_error()
+    tf_logging.disable_progress_bar()
+except Exception:
+    pass
+
 
 class _SpectrogramEncoder(nn.Module):
     """Simple spectrogram + CNN audio encoder fallback (no external models needed)."""

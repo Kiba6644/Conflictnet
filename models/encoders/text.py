@@ -45,6 +45,9 @@ class DeBERTaEncoder(nn.Module):
 
         try:
             from transformers import AutoModel, AutoTokenizer
+            from transformers.utils import logging as tf_logging
+            tf_logging.set_verbosity_error()
+            tf_logging.disable_progress_bar()
             self.encoder = AutoModel.from_pretrained(model_name)
             self.tokenizer = AutoTokenizer.from_pretrained(model_name)
             self.output_dim = self.encoder.config.hidden_size
