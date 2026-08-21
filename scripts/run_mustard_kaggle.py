@@ -105,6 +105,8 @@ MUSTARD_KAGGLE_INPUTS = [
     Path("/kaggle/input/mustard-sarcasm-detection/MUStARD/data/clips"),
     Path("/kaggle/input/mustard-sarcasm-detection/MUStARD/data"),
     Path("/kaggle/input/mustard-sarcasm-detection"),
+    Path("/kaggle/input/datasets/nith27/mustard-sarcasm-detection"),
+    Path("/kaggle/input/datasets/nith27/mustard-dataset"),
     Path("/kaggle/input/notebooks/nith27/mustard-sarcasm-detection"),
 ]
 
@@ -125,6 +127,15 @@ def find_mustard_clips_dir(requested_dir: Path, explicit_mount: Optional[str] = 
             print(f"[MUStARD] 🚀 Found attached Kaggle dataset at {candidate} (0s load time)")
             return candidate
 
+    kaggle_input = Path("/kaggle/input")
+    if kaggle_input.exists():
+        try:
+            for p in kaggle_input.glob("*/*"):
+                if p.is_dir() and (p.name == "clips" or (p / "clips").exists()):
+                    return p / "clips" if (p / "clips").exists() else p
+        except Exception:
+            pass
+
     return requested_dir
 
 
@@ -137,22 +148,27 @@ def download_mustard_clips(clips_dir: Path, explicit_mount: Optional[str] = None
             print(f"[MUStARD] Already available ({len(media_files)} clips) at {clips_dir}, skipping download.")
             return clips_dir
 
-    clips_dir.mkdir(parents=True, exist_ok=True)
-    zip_path = clips_dir.parent / "mmsd.zip"
+    if str(clips_dir).startswith("/kaggle/input"):
+        target_clips_dir = Path("/kaggle/working/mustard_clips")
+    else:
+        target_clips_dir = clips_dir
+
+    target_clips_dir.mkdir(parents=True, exist_ok=True)
+    zip_path = Path("/tmp/mmsd.zip")
 
     url = "https://huggingface.co/datasets/MichiganNLP/MUStARD/resolve/main/mmsd_raw_data.zip"
     download_fast(url, zip_path)
 
     print("[MUStARD] Extracting clips archive...")
-    run(["unzip", "-q", "-o", str(zip_path), "-d", str(clips_dir)])
+    run(["unzip", "-q", "-o", str(zip_path), "-d", str(target_clips_dir)])
     if zip_path.exists():
         zip_path.unlink()
 
-    media_files = list(clips_dir.rglob("*.mp4")) + list(clips_dir.rglob("*.wav"))
+    media_files = list(target_clips_dir.rglob("*.mp4")) + list(target_clips_dir.rglob("*.wav"))
     if not media_files:
-        raise RuntimeError(f"[MUStARD] No media files found after extraction in {clips_dir}")
+        raise RuntimeError(f"[MUStARD] No media files found after extraction in {target_clips_dir}")
     print(f"[MUStARD] ✅ {len(media_files)} clips ready.")
-    return clips_dir
+    return target_clips_dir
 
 
 def warmup_models(audio_encoder):
