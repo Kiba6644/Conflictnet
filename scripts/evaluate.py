@@ -167,6 +167,10 @@ def main():
             if len(sample_audio) < 4:
                 sample_audio.append(batch_gpu["audio"][:1])
 
+    if len(all_probs) == 0:
+        logger.error("[Eval] No evaluation samples were processed. Please verify your dataset test split files.")
+        return
+
     all_probs = np.concatenate(all_probs, axis=0)
     all_labels = np.concatenate(all_labels, axis=0)
 

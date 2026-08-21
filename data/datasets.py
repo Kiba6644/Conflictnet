@@ -705,32 +705,21 @@ class MELDDataset(Dataset):
             logger.warning(f"[MELD] CSV not found in {self.root} for split {split_name}")
             return []
 
-        # Index all audio/video files (.wav, .mp4, etc.) in direct target directories
+        # Index all audio/video files (.wav, .mp4, etc.) across self.root
         valid_exts = {".wav", ".mp4", ".flac", ".m4a", ".mp3", ".mkv", ".avi"}
         media_index: Dict[str, Path] = {}
-        search_dirs = [
-            self.root / split_name / f"{split_name}_splits",
-            self.root / f"{split_name}_splits",
-            self.root / f"{split_name}_splits_complete",
-            self.root / "output_repeated_splits_test" if split_name == "test" else self.root / "train_splits",
-            self.root / split_name,
-            self.root,
-        ]
-        for s_dir in search_dirs:
-            if s_dir.exists():
-                try:
-                    for root_d, dirs_d, files_d in os.walk(str(s_dir)):
-                        if ".git" in dirs_d:
-                            dirs_d.remove(".git")
-                        for f in files_d:
-                            if any(f.lower().endswith(ext) for ext in valid_exts):
-                                p = Path(root_d) / f
-                                media_index[p.stem] = p
-                                media_index[p.name] = p
-                except Exception as e:
-                    logger.warning(f"[MELD] Error scanning {s_dir}: {e}")
-                if media_index:
-                    break
+        if self.root.exists():
+            try:
+                for root_d, dirs_d, files_d in os.walk(str(self.root)):
+                    if ".git" in dirs_d:
+                        dirs_d.remove(".git")
+                    for f in files_d:
+                        if any(f.lower().endswith(ext) for ext in valid_exts):
+                            p = Path(root_d) / f
+                            media_index[p.stem] = p
+                            media_index[p.name] = p
+            except Exception as e:
+                logger.warning(f"[MELD] Error scanning {self.root}: {e}")
 
         items = []
         with open(csv_path, "r", encoding="utf-8") as f:

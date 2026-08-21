@@ -396,20 +396,21 @@ class ConflictNetTrainer:
                 f"Val F1: {val_f1:.4f}{tag}"
             )
 
-            # Early stopping check
-            if torch.distributed.is_initialized():
-                val_f1_t = torch.tensor([val_f1], dtype=torch.float, device=self.device)
-                torch.distributed.all_reduce(val_f1_t, op=torch.distributed.ReduceOp.AVG)
-                val_f1 = val_f1_t.item()
+            # Early stopping check (only during finetune phase)
+            if not is_pretrain:
+                if torch.distributed.is_initialized():
+                    val_f1_t = torch.tensor([val_f1], dtype=torch.float, device=self.device)
+                    torch.distributed.all_reduce(val_f1_t, op=torch.distributed.ReduceOp.AVG)
+                    val_f1 = val_f1_t.item()
 
-            if val_f1 > self._best_val_f1:
-                self._best_val_f1 = val_f1
-                self._patience_counter = 0
-            else:
-                self._patience_counter += 1
-                if self._patience_counter >= early_stop_patience:
-                    logger.info(f"Early stopping triggered at epoch {epoch+1} (patience={early_stop_patience})")
-                    break
+                if val_f1 > self._best_val_f1:
+                    self._best_val_f1 = val_f1
+                    self._patience_counter = 0
+                else:
+                    self._patience_counter += 1
+                    if self._patience_counter >= early_stop_patience:
+                        logger.info(f"Early stopping triggered at epoch {epoch+1} (patience={early_stop_patience})")
+                        break
 
         logger.info(f"✅ Training complete. Best val F1 = {self.best_val_f1:.4f}")
 
