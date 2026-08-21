@@ -520,11 +520,11 @@ class ConflictNet(nn.Module):
 
                     type_loss = sarc_loss + 0.1 * other_loss
                 else:
-                    type_loss = torch.tensor(0.0, device=audio.device)
+                    type_loss = (logits_type * 0.0).sum()
 
                 losses.append(type_loss)
             else:
-                losses.append(torch.tensor(0.0, device=audio.device))
+                losses.append((logits_type * 0.0).sum())
 
             # 6c. Severity MSE loss
             if severity is not None and severity_labels is not None:
@@ -533,7 +533,7 @@ class ConflictNet(nn.Module):
                 sev_loss = nn.functional.mse_loss(sev_pred, sev_target)
                 losses.append(sev_loss)
             else:
-                losses.append(torch.tensor(0.0, device=audio.device))
+                losses.append((severity * 0.0).sum() if severity is not None else torch.tensor(0.0, device=audio.device))
 
             # 6d. Self-supervised swap loss (pre-training only)
             if self.swap_objective is not None:

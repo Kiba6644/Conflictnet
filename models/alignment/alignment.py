@@ -231,16 +231,20 @@ class ContextGatedContrastiveLoss(nn.Module):
         # Standard symmetric InfoNCE
         B = audio_embeds.size(0)
         labels = torch.arange(B, device=audio_embeds.device)
-        if sarcasm_mask is not None and sarcasm_mask.any():
-            labels = labels.clone()
-            labels[sarcasm_mask] = -1   # cross_entropy ignore_index=-1
-        loss_a2t = F.cross_entropy(sim_a2t, labels, ignore_index=-1)
-        loss_t2a = F.cross_entropy(sim_t2a, labels, ignore_index=-1)
+        if sarcasm_mask is not None and sarcasm_mask.all():
+            loss_a2t = (sim_a2t * 0.0).sum()
+            loss_t2a = (sim_t2a * 0.0).sum()
+        else:
+            if sarcasm_mask is not None and sarcasm_mask.any():
+                labels = labels.clone()
+                labels[sarcasm_mask] = -1   # cross_entropy ignore_index=-1
+            loss_a2t = F.cross_entropy(sim_a2t, labels, ignore_index=-1)
+            loss_t2a = F.cross_entropy(sim_t2a, labels, ignore_index=-1)
         contrastive_loss = (loss_a2t + loss_t2a) / 2
 
         # Conflict separation loss: push paired audio↔text apart by margin
         # (uses un-scaled cosine similarities since margin is in cosine space)
-        conflict_sep_loss = torch.tensor(0.0, device=audio_embeds.device)
+        conflict_sep_loss = (sim_raw * 0.0).sum()
         if conflict_labels is not None and conflict_labels.sum() > 0:
             conflict_mask = conflict_labels.bool()
             apply_sep = conflict_mask
@@ -248,7 +252,7 @@ class ContextGatedContrastiveLoss(nn.Module):
                 apply_sep = conflict_mask & ~sarcasm_mask   # prosodic-only conflict
             if apply_sep.any():
                 paired_sim = torch.diagonal(sim_raw)  # (B,) — un-scaled cosine sim
-                conflict_sep_loss = F.relu(
+                conflict_sep_loss = conflict_sep_loss + F.relu(
                     paired_sim[apply_sep] + self.conflict_margin
                 ).mean()
 
