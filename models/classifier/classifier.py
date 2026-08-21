@@ -169,8 +169,6 @@ class ConflictClassifier(nn.Module):
         feat = self.shared_mlp(x)
 
         logits_type = self.type_head(feat)       # (B, n_types)
-        sarcasm_logit = self.sarcasm_head(feat)  # (B, 1)
-        logits_type = torch.cat([sarcasm_logit, logits_type[:, 1:]], dim=-1) # (B, n_types)
         probs_type = torch.sigmoid(logits_type)  # (B, n_types)
 
         severity = None

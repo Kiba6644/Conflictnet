@@ -98,7 +98,8 @@ class DeBERTaEncoder(nn.Module):
         if isinstance(self.encoder, _TextFallbackEncoder):
             return self.encoder(input_ids, attention_mask, return_tokens)
         out = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
-        pooled = out.last_hidden_state[:, 0, :].float()
+        mask = attention_mask.unsqueeze(-1).float()
+        pooled = (out.last_hidden_state.float() * mask).sum(1) / mask.sum(1).clamp(min=1e-9)
         if return_tokens:
             return pooled, out.last_hidden_state.float()
         return pooled

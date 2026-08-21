@@ -43,6 +43,16 @@ SAMPLE_RATE = 16000
 MAX_AUDIO_LEN = 10.0  # seconds
 MAX_TEXT_LEN = 512
 
+# Number of emotion categories (matches CREMA-D's 6 classes)
+N_EMOTION_CLASSES = 6
+# Label indices for each category (for use by all datasets)
+EMOTION_IDX_ANGER = 0
+EMOTION_IDX_DISGUST = 1
+EMOTION_IDX_FEAR = 2
+EMOTION_IDX_HAPPINESS = 3
+EMOTION_IDX_NEUTRAL = 4
+EMOTION_IDX_SADNESS = 5
+
 IEMOCAP_EMOTION_MAP = {
     "ang": 0, "hap": 1, "exc": 1,  # merge excited→happy
     "sad": 2, "neu": 3, "fru": 4, "fea": 5, "sur": 6, "dis": 7, "oth": 8,
@@ -268,7 +278,9 @@ class IEMOCAPDataset(Dataset):
                         if not wav_path.exists():
                             continue
                         text = transcripts.get(utt_id, "")
-                        conflict = emotion in CONFLICT_EMOTIONS if self.conflict_as_anger_frustration else 0
+                        if not self.conflict_as_anger_frustration:
+                            raise NotImplementedError("IEMOCAP currently only supports conflict_as_anger_frustration=True")
+                        conflict = emotion in CONFLICT_EMOTIONS
                         # IEMOCAP: anger→anger(0), frustration→anger(0), all others→neutral(4)
                         # Map IEMOCAP emotions to the 6-class CREMA-D emotion label space
                         type_labels = [0] * N_EMOTION_CLASSES
@@ -468,7 +480,7 @@ class MUStARDDataset(Dataset):
         target_train = int(len(all_samples) * train_ratio)
         for sid in speaker_ids:
             samples = speaker_groups[sid]
-            if not train_items or len(train_items) + len(samples) <= target_train:
+            if not train_items or len(train_items) + len(samples) < target_train:
                 train_items.extend(samples)
             else:
                 val_items.extend(samples)
@@ -506,6 +518,8 @@ class MUStARDDataset(Dataset):
             "gender": None,
             "text": item["text"],
             "utterance_id": Path(item["wav_path"]).stem,
+            "conversation_id": item.get("conversation_id", Path(item["wav_path"]).stem),
+            "turn_index": item.get("turn_index", 0),
             "word_timestamps": word_timestamps,
             "token_word_boundaries": token_word_boundaries,
             "dataset_name": item.get("dataset_name", "unknown"),
@@ -527,16 +541,6 @@ CREMAD_EMOTION_IDX = {
     "HAP": 3, "NEU": 4, "SAD": 5,
 }
 CREMAD_CONFLICT_EMOTIONS = {"ANG", "DIS", "FEA"}  # anger, disgust, fear → binary conflict
-
-# Number of emotion categories (matches CREMA-D's 6 classes)
-N_EMOTION_CLASSES = 6
-# Label indices for each category (for use by all datasets)
-EMOTION_IDX_ANGER = 0
-EMOTION_IDX_DISGUST = 1
-EMOTION_IDX_FEAR = 2
-EMOTION_IDX_HAPPINESS = 3
-EMOTION_IDX_NEUTRAL = 4
-EMOTION_IDX_SADNESS = 5
 
 
 class CREMADDataset(Dataset):
@@ -624,7 +628,7 @@ class CREMADDataset(Dataset):
         target_train = int(len(all_samples) * train_ratio)
         for sid in speaker_ids:
             samples = speaker_groups[sid]
-            if not train_items or len(train_items) + len(samples) <= target_train:
+            if not train_items or len(train_items) + len(samples) < target_train:
                 train_items.extend(samples)
             else:
                 val_items.extend(samples)
@@ -660,6 +664,8 @@ class CREMADDataset(Dataset):
             "gender": item["gender"],
             "text": item["text"],
             "utterance_id": Path(item["wav_path"]).stem,
+            "conversation_id": Path(item["wav_path"]).stem,
+            "turn_index": 0,
             "word_timestamps": word_timestamps,
             "token_word_boundaries": token_word_boundaries,
         }
@@ -801,7 +807,8 @@ class MELDDataset(Dataset):
                     "text": text,
                     "emotion": emotion,
                     "dialogue_id": dia_id,
-                    "utterance_id": int(utt_id) if utt_id.isdigit() else 0,
+                    "utterance_id": utt_id,
+                    "turn_index": int(utt_id) if utt_id.isdigit() else 0,
                     "conflict_binary": int(conflict),
                     "conflict_type_labels": type_labels,  # 6-class one-hot: [anger, disgust, fear, happiness, neutral, sadness]
                     "severity": float(conflict),  # binary proxy; no real severity in MELD
@@ -859,7 +866,7 @@ class MELDDataset(Dataset):
             "text": item["text"],
             "utterance_id": Path(item["wav_path"]).stem,
             "conversation_id": f"meld_{item['dialogue_id']}",
-            "turn_index": int(item["utterance_id"]),
+            "turn_index": item.get("turn_index", 0),
             "word_timestamps": word_timestamps,
             "token_word_boundaries": token_word_boundaries,
             "dataset_name": item.get("dataset_name", "unknown"),
@@ -1014,6 +1021,8 @@ class CMUMOSEIDataset(Dataset):
             "gender": item["gender"],
             "text": item["text"],
             "utterance_id": Path(item["wav_path"]).stem,
+            "conversation_id": f"mosei_{Path(item['wav_path']).stem.split('_')[0]}",
+            "turn_index": int(Path(item['wav_path']).stem.split('_')[1]) if '_' in Path(item['wav_path']).stem and Path(item['wav_path']).stem.split('_')[1].isdigit() else 0,
             "word_timestamps": word_timestamps,
             "token_word_boundaries": token_word_boundaries,
         }
@@ -1171,6 +1180,8 @@ class CASEDataset(Dataset):
             "gender": item["gender"],
             "text": item["text"],
             "utterance_id": Path(item["wav_path"]).stem if item["wav_path"] is not None else f"case_{idx}",
+            "conversation_id": Path(item["wav_path"]).stem if item["wav_path"] is not None else f"case_{idx}",
+            "turn_index": 0,
             "word_timestamps": word_timestamps,
             "token_word_boundaries": token_word_boundaries,
         }
@@ -1235,7 +1246,7 @@ class GoEmotionsDataset(Dataset):
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "conflict_binary": torch.tensor(0, dtype=torch.long),
-            "conflict_type_labels": torch.tensor([0, 0, 0], dtype=torch.float),
+            "conflict_type_labels": torch.tensor([0, 0, 0, 0, 0, 0], dtype=torch.float),
             "severity": torch.tensor(0.0, dtype=torch.float),
             "speaker_id": f"goemotions_{idx}",
             "gender": None,
@@ -1263,11 +1274,14 @@ def _collate_core(
             Generated offline by ``scripts/compute_prosody_stats.py``.
             If None, z-scores default to zeros.
     """
+    batch_out = []
     if augmentor is not None and augmentor.available:
         for b in batch:
             aug_np = augmentor(b["audio_np"])
-            b["audio_np"] = aug_np
-            b["audio"] = torch.tensor(aug_np, dtype=torch.float32)
+            # Create a shallow copy and update so we don't mutate the original dict
+            b_new = {**b, "audio_np": aug_np, "audio": torch.tensor(aug_np, dtype=torch.float32)}
+            batch_out.append(b_new)
+        batch = batch_out
 
     max_len = max(b["audio"].shape[0] for b in batch)
     audio_padded = torch.zeros(len(batch), max_len)

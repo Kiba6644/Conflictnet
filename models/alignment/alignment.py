@@ -119,7 +119,7 @@ class CrossModalAttention(nn.Module):
             if context_padding is not None:
                 valid = torch.zeros(B, 1, dtype=torch.bool, device=device)
                 kv_padding_audio = torch.cat([valid, context_padding], dim=1)
-                kv_padding_text = kv_padding_audio
+                kv_padding_text = kv_padding_audio.clone()
                 # Guard against all-masked context: insert a neutral unmasked key
                 fully_masked = context_padding.all(dim=1)  # (B,)
                 if fully_masked.any():
@@ -252,6 +252,9 @@ class ContextGatedContrastiveLoss(nn.Module):
                 apply_sep = conflict_mask & ~sarcasm_mask   # prosodic-only conflict
             if apply_sep.any():
                 paired_sim = torch.diagonal(sim_raw)  # (B,) — un-scaled cosine sim
+                # Conflict pairs should have LOW cosine similarity (audio ≠ text).
+                # We penalise when sim > -conflict_margin, pushing them apart
+                # until sim < -margin in the L2-normalised cosine space.
                 conflict_sep_loss = conflict_sep_loss + F.relu(
                     paired_sim[apply_sep] + self.conflict_margin
                 ).mean()

@@ -44,9 +44,10 @@ class _SpectrogramEncoder(nn.Module):
     def forward(self, audio, attention_mask=None, return_frames=False):
         spec = torch.stft(audio, n_fft=512, hop_length=160, window=self.hann,
                           return_complex=True).abs()
-        pooled = self.conv(spec).mean(dim=-1)
+        conv_out = self.conv(spec)
+        pooled = conv_out.mean(dim=-1)
         if return_frames:
-            frames = self.conv(spec).permute(0, 2, 1)
+            frames = conv_out.permute(0, 2, 1)
             return pooled, frames
         return pooled
 
@@ -253,24 +254,21 @@ class Emotion2VecEncoder(nn.Module):
     ):
         super().__init__()
         self.model_name = model_name
-        self.output_dim = 768
         self._freeze = freeze
         self._model = WavLMEncoder(freeze=freeze)
+        self.output_dim = self._model.output_dim
         self._backend = "fallback_wavlm"
         self._try_funasr()
 
     def _try_funasr(self):
-        try:
-            from funasr import AutoModel
-            self._model = AutoModel(
-                model=self.model_name,
-                disable_update=True,
-                disable_pipeline=True,
-            )
-            self._backend = "funasr"
-            logger.info(f"[Emotion2Vec] funasr backend: {self.model_name}")
-        except Exception as e:
-            logger.warning(f"[Emotion2Vec] funasr unavailable ({e}), using WavLM/spectrogram")
+        from funasr import AutoModel
+        self._model = AutoModel(
+            model=self.model_name,
+            disable_update=True,
+            disable_pipeline=True,
+        )
+        self._backend = "funasr"
+        logger.info(f"[Emotion2Vec] funasr backend: {self.model_name}")
 
     def forward(self, audio, attention_mask=None, return_frames=False):
         if self._backend == "funasr":

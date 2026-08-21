@@ -167,10 +167,12 @@ class ConflictNetTrainer:
             {"params": encoder_params, "lr": lr,       "name": "encoder"},
             {"params": head_params,    "lr": lr * 10,  "name": "heads"},
         ], weight_decay=0.01, **kwargs)
-        steps_per_epoch = len(self.train_loader)
+        grad_accum_steps = int(self.cfg.get("gradient_accumulation_steps", 1))
+        steps_per_epoch = max(1, len(self.train_loader) // grad_accum_steps)
         epochs = self.cfg.get("epochs", 50)
         from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
-        self.scheduler = CosineAnnealingWarmRestarts(self.optimizer, T_0=10, T_mult=2)
+        # Restart every 10 epochs worth of optimizer steps
+        self.scheduler = CosineAnnealingWarmRestarts(self.optimizer, T_0=steps_per_epoch * 10, T_mult=2)
 
     def _setup_wandb(self):
         self.use_wandb = False
@@ -211,6 +213,7 @@ class ConflictNetTrainer:
             self.train_loader.sampler.set_epoch(epoch)
 
         self.optimizer.zero_grad()
+        self.ctx_cache.clear()
 
         for batch in self.train_loader:
             # non_blocking=True pairs with pin_memory=True on the DataLoader
@@ -254,7 +257,10 @@ class ConflictNetTrainer:
             # Update context cache with current turn fused embeddings
             if conv_ids and isinstance(conv_ids, list) and output.fused_embed is not None:
                 str_conv_ids: list[str] = [str(x) for x in conv_ids]
-                self.ctx_cache.batch_update(str_conv_ids, output.fused_embed)
+                turn_indices = batch.get("turn_indices", None)
+                if isinstance(turn_indices, torch.Tensor):
+                    turn_indices = turn_indices.cpu().tolist()
+                self.ctx_cache.batch_update(str_conv_ids, output.fused_embed, turn_indices=turn_indices)
 
             loss = output.loss
             if loss is None or not loss.requires_grad:

@@ -51,6 +51,7 @@ class ContextCache:
         ctx = self._cache[conv_id]
         if ctx.size(0) > self.max_turns:
             ctx = ctx[-self.max_turns:]
+            self._cache[conv_id] = ctx
         return ctx
 
     def get_batch_context(
@@ -110,15 +111,22 @@ class ContextCache:
         self,
         conv_ids: List[str],
         turn_embeds: torch.Tensor,
+        turn_indices: Optional[List[int]] = None,
     ):
-        """Update cache for all samples in a batch.
+        """Update cache for all samples in a batch in chronological turn order.
 
         Args:
             conv_ids: Conversation identifiers for each sample.
             turn_embeds: ``(B, embed_dim)`` — one per sample.
+            turn_indices: Optional list of turn indices. If provided, samples
+                are updated in turn order so the cache reflects the dialogue sequence.
         """
-        for i, cid in enumerate(conv_ids):
-            self.update(cid, turn_embeds[i])
+        if turn_indices is not None:
+            order = sorted(range(len(conv_ids)), key=lambda i: turn_indices[i])
+        else:
+            order = range(len(conv_ids))
+        for i in order:
+            self.update(conv_ids[i], turn_embeds[i])
 
     def clear(self, conv_id: Optional[str] = None):
         """Clear cache for one or all conversations."""

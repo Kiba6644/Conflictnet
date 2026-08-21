@@ -156,7 +156,7 @@ class MultiTaskLoss(nn.Module):
         weights = {}
         for i, loss in enumerate(losses):
             precision = torch.exp(-self.log_vars[i])
-            total = total + precision * loss + self.log_vars[i]
+            total = total + precision * loss + 0.5 * self.log_vars[i]
             weights[f"sigma_task_{i}"] = torch.exp(self.log_vars[i] * 0.5).item()
         return total, weights
 
@@ -213,8 +213,10 @@ class ConflictNet(nn.Module):
         self.use_baseline_subtract = use_baseline_subtract
         self.label_smoothing = label_smoothing
 
-        pos_w = torch.ones(n_conflict_types)
-        pos_w[0] = sarcasm_pos_weight
+        # Uniform pos_weight across all emotion slots — each is a minority class.
+        # Old code used sarcasm_pos_weight=8.0 on slot 0 only, which was wrong
+        # for MELD/CREMA-D where slot 0 is anger (different class balance).
+        pos_w = torch.full((n_conflict_types,), 3.0)
         self.register_buffer("pos_weight", pos_w)
 
         # 1. Encoders
@@ -481,9 +483,14 @@ class ConflictNet(nn.Module):
             losses = []
 
             # 6a. Contrastive loss
+            # sarcasm_mask used to exclude sarcasm pairs from InfoNCE (they're
+            # intentionally audio≠text, so forcing alignment would be wrong).
+            # BUG FIX: was conflict_type_labels[:,0] which is the anger slot —
+            # for MELD, any angry (conflict=1) sample got incorrectly excluded.
+            # Fixed: use conflict_binary_labels which is dataset-agnostic.
             sarcasm_mask = None
-            if conflict_type_labels is not None:
-                sarcasm_mask = conflict_type_labels[:, 0].bool()
+            if conflict_binary_labels is not None:
+                sarcasm_mask = conflict_binary_labels.bool()
 
             cl = self.contrastive_loss_fn(
                 audio_embed, text_embed,
@@ -494,37 +501,26 @@ class ConflictNet(nn.Module):
             losses.append(cl)
 
             # 6b. Multi-label BCE loss for conflict types (with label smoothing)
+            # BUG FIX: old code gated the entire loss on dataset_names == "mustard",
+            # giving MELD/CREMA-D/IEMOCAP samples a ZERO gradient on their emotion
+            # labels. Now all datasets use the same focal BCE path uniformly.
             if conflict_type_labels is not None:
                 eps = self.label_smoothing
                 smooth_labels = conflict_type_labels.float().clamp(eps, 1.0 - eps)
-                if dataset_names is not None:
-                    mustard_mask = torch.tensor(
-                        [n == "mustard" for n in dataset_names],
-                        dtype=torch.bool, device=audio.device
-                    )
-                else:
-                    mustard_mask = torch.ones(audio.size(0), dtype=torch.bool, device=audio.device)
 
-                if mustard_mask.any():
-                    # Sarcasm slot: focal loss
-                    sarc_logits = logits_type[mustard_mask, 0:1]
-                    sarc_labels = smooth_labels[mustard_mask, 0:1]
-                    sarc_loss = focal_bce_loss(sarc_logits, sarc_labels,
-                                                alpha=0.75, gamma=2.0,
-                                                pos_weight=self.pos_weight[0:1].to(audio.device))
-
-                    # Other slots: standard BCE
-                    other_logits = logits_type[mustard_mask, 1:]
-                    other_labels = smooth_labels[mustard_mask, 1:]
-                    other_loss = F.binary_cross_entropy_with_logits(other_logits, other_labels)
-
-                    type_loss = sarc_loss + 0.1 * other_loss
-                else:
-                    type_loss = (logits_type * 0.0).sum()
-
+                # Focal loss on all conflict-emotion slots (anger, disgust, fear = 0,1,2)
+                # which are the minority classes across all datasets.
+                type_loss = focal_bce_loss(
+                    logits_type,
+                    smooth_labels,
+                    alpha=0.75,
+                    gamma=2.0,
+                    pos_weight=self.pos_weight.to(audio.device),
+                )
                 losses.append(type_loss)
             else:
                 losses.append((logits_type * 0.0).sum())
+
 
             # 6c. Severity MSE loss
             if severity is not None and severity_labels is not None:
