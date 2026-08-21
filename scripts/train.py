@@ -247,21 +247,45 @@ def main():
 
     logger.info(f"Train samples: {len(train_set)} | Val samples: {len(val_set)}")
 
-    # --- Build model ---
+    # --- Build model (DDP-safe: rank 0 first to warm HF/SpeechBrain cache) ---
+    # In multi-GPU DDP runs torchrun spawns all worker processes simultaneously.
+    # If every rank tries to download HuggingFace / SpeechBrain weights at the
+    # same time, one rank can get a partial/corrupt file and fall back to a
+    # dummy encoder (4 trainable tensors vs 102), which the DDP consistency
+    # check then correctly rejects with RuntimeError.
+    #
+    # Fix: rank 0 builds the model first (all downloads happen here), then
+    # signals via barrier(), and only then do the other ranks build from the
+    # now-fully-populated on-disk cache. Non-DDP runs skip the barriers.
     from models.conflictnet import ConflictNet
 
-    model = ConflictNet(
-        audio_encoder_name=args.audio_encoder,
-        embed_dim=args.embed_dim,
-        use_speaker_norm=not args.no_speaker_norm,
-        use_temporal=not args.no_temporal,
-        use_cross_attn_injection=not args.no_cross_attn_injection,
-        use_speaker_adaptive_threshold=not args.no_speaker_adaptive_threshold,
-        use_baseline_subtract=not args.no_baseline_subtract,
-        use_word_divergence=not args.no_word_divergence,
-        lora_r=args.lora_r,
-        label_smoothing=args.label_smoothing,
-    )
+    def _build_model():
+        return ConflictNet(
+            audio_encoder_name=args.audio_encoder,
+            embed_dim=args.embed_dim,
+            use_speaker_norm=not args.no_speaker_norm,
+            use_temporal=not args.no_temporal,
+            use_cross_attn_injection=not args.no_cross_attn_injection,
+            use_speaker_adaptive_threshold=not args.no_speaker_adaptive_threshold,
+            use_baseline_subtract=not args.no_baseline_subtract,
+            use_word_divergence=not args.no_word_divergence,
+            lora_r=args.lora_r,
+            label_smoothing=args.label_smoothing,
+        )
+
+    is_ddp = local_rank != -1 and torch.distributed.is_initialized()
+    if is_ddp:
+        if local_rank == 0:
+            logger.info("[DDP] Rank 0 building model and warming HF/SpeechBrain cache...")
+            model = _build_model()
+            logger.info("[DDP] Rank 0 done — releasing barrier for other ranks.")
+        torch.distributed.barrier()  # non-zero ranks wait until rank 0 finishes all downloads
+        if local_rank != 0:
+            logger.info(f"[DDP] Rank {local_rank} building model from warm cache...")
+            model = _build_model()
+        torch.distributed.barrier()  # all ranks confirm they've finished building
+    else:
+        model = _build_model()
 
     param_counts = model.count_parameters()
     total_trainable = sum(v["trainable"] for v in param_counts.values())
