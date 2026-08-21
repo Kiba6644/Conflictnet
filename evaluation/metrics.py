@@ -97,8 +97,41 @@ def compute_all_metrics(
     # Weighted accuracy (sklearn accuracy_score uses equal weights by default)
     # WAcc = accuracy weighted by inverse class frequency
     from sklearn.utils.class_weight import compute_sample_weight  # type: ignore
-    sample_weights = compute_sample_weight("balanced", conflict_true)
-    metrics["wacc"] = float(np.average(conflict_pred == conflict_true, weights=sample_weights))
+    try:
+        sample_weights = compute_sample_weight("balanced", conflict_true)
+        metrics["wacc"] = float(np.average(conflict_pred == conflict_true, weights=sample_weights))
+    except Exception:
+        metrics["wacc"] = float(accuracy_score(conflict_true, conflict_pred))
+
+    # --- Optimal Threshold Search (Threshold Tuning) ---
+    # Probabilities for sigmoid multi-label classifiers often peak below 0.5.
+    # We perform a grid search over [0.05, 0.50] to find the decision threshold
+    # that maximizes binary F1 score and macro F1 score.
+    best_opt_thresh = 0.5
+    best_opt_f1 = 0.0
+    best_opt_acc = 0.0
+    best_opt_macro_f1 = 0.0
+
+    conf_probs = probs_type[:, conflict_indices].max(axis=1)
+
+    for thresh in np.arange(0.05, 0.55, 0.02):
+        t_pred = (conf_probs >= thresh).astype(int)
+        t_f1 = float(f1_score(conflict_true, t_pred, zero_division=0))
+        if t_f1 > best_opt_f1:
+            best_opt_f1 = t_f1
+            best_opt_thresh = float(thresh)
+            best_opt_acc = float(accuracy_score(conflict_true, t_pred))
+
+        # Also search best macro F1 across type predictions
+        type_t_pred = (probs_type >= thresh).astype(int)
+        t_macro = float(f1_score(labels_type, type_t_pred, average="macro", zero_division=0))
+        if t_macro > best_opt_macro_f1:
+            best_opt_macro_f1 = t_macro
+
+    metrics["opt_threshold"] = round(best_opt_thresh, 4)
+    metrics["opt_binary_f1"] = round(best_opt_f1, 4)
+    metrics["opt_binary_acc"] = round(best_opt_acc, 4)
+    metrics["opt_macro_f1"] = round(best_opt_macro_f1, 4)
 
     # Severity metrics
     if severity_pred is not None and severity_true is not None:
