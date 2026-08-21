@@ -322,6 +322,7 @@ class ConflictNetTrainer:
         import numpy as np
         all_probs = []
         all_labels = []
+        all_binary = []
 
         for batch in self.val_loader:
             batch = {
@@ -347,24 +348,39 @@ class ConflictNetTrainer:
             )
             all_probs.append(output.probs_type.float().cpu().numpy())
             all_labels.append(batch["conflict_type_labels"].cpu().numpy())
+            all_binary.append(batch["conflict_binary"].cpu().numpy())
 
-        probs = np.concatenate(all_probs)
-        labels = np.concatenate(all_labels)
+        probs = np.concatenate(all_probs)    # (N, n_classes)
+        labels = np.concatenate(all_labels)  # (N, n_classes)
+        binary = np.concatenate(all_binary)  # (N,)
 
-        ap_sarcasm = average_precision_score(labels[:, 0], probs[:, 0])
+        # --- Binary conflict F1 / AUC (dataset-agnostic) ---
+        # Max probability across conflict emotion slots (anger, disgust, fear = indices 0,1,2)
+        conflict_prob = probs[:, :3].max(axis=1)
+        bin_pred = (conflict_prob > 0.5).astype(int)
+        binary_int = binary.astype(int)
+        f1_binary = f1_score(binary_int, bin_pred, zero_division=0)
         try:
-            auc_sarcasm = roc_auc_score(labels[:, 0], probs[:, 0])
+            auc_binary = roc_auc_score(binary_int, conflict_prob)
         except ValueError:
-            auc_sarcasm = 0.5  # handle case where all labels are 0 or 1
-        bin_pred = (probs[:, 0] > 0.5).astype(int)
-        bin_label = (labels[:, 0] > 0.5).astype(int)
-        f1 = f1_score(bin_label, bin_pred, zero_division=0)
+            auc_binary = 0.5  # degenerate split with only one class present
+
+        # --- Per-class AP, averaged over classes that have at least one positive ---
+        per_class_ap = []
+        for c in range(labels.shape[1]):
+            if labels[:, c].sum() > 0:
+                try:
+                    per_class_ap.append(average_precision_score(labels[:, c], probs[:, c]))
+                except ValueError:
+                    pass
+        macro_ap = float(np.mean(per_class_ap)) if per_class_ap else 0.0
 
         return {
-            "val/ap_sarcasm": float(ap_sarcasm),
-            "val/auc_sarcasm": float(auc_sarcasm),
-            "val/f1_sarcasm": float(f1),
-            "val/f1_weighted": float(ap_sarcasm),  # hack to let existing best_val_f1 logic work with ap_sarcasm
+            "val/f1_binary": float(f1_binary),
+            "val/auc_binary": float(auc_binary),
+            "val/macro_ap": float(macro_ap),
+            # val/f1_weighted drives best-checkpoint and early-stopping logic
+            "val/f1_weighted": float(f1_binary),
         }
 
     def train(

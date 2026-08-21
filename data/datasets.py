@@ -803,7 +803,7 @@ class MELDDataset(Dataset):
                     "dialogue_id": dia_id,
                     "utterance_id": int(utt_id) if utt_id.isdigit() else 0,
                     "conflict_binary": int(conflict),
-                    "conflict_type_labels": [0] * N_EMOTION_CLASSES,
+                    "conflict_type_labels": type_labels,  # 6-class one-hot: [anger, disgust, fear, happiness, neutral, sadness]
                     "severity": float(conflict),  # binary proxy; no real severity in MELD
                     "speaker_id": f"meld_{speaker}",
                     "gender": None,
