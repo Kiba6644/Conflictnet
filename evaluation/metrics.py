@@ -76,13 +76,21 @@ def compute_all_metrics(
             except ValueError:
                 metrics[f"auc_{name}"] = float("nan")
 
-    # Binary conflict flag (any type)
-    conflict_pred = preds_type.any(axis=1).astype(int)
-    conflict_true = labels_type.any(axis=1).astype(int)
+    # Binary conflict flag (only over conflict-specific indices)
+    if n_types == 6:
+        # In the 6-class setup (anger, disgust, fear, happiness, neutral, sadness)
+        # the first three (anger, disgust, fear) map to conflict.
+        conflict_indices = [0, 1, 2]
+    else:
+        # In MUStARD 3-class setup (sarcasm, suppression, deception) all are conflict types.
+        conflict_indices = list(range(n_types))
+
+    conflict_pred = preds_type[:, conflict_indices].any(axis=1).astype(int)
+    conflict_true = labels_type[:, conflict_indices].any(axis=1).astype(int)
     metrics["binary_f1"] = f1_score(conflict_true, conflict_pred, zero_division=0)
     metrics["binary_acc"] = accuracy_score(conflict_true, conflict_pred)
     try:
-        metrics["binary_auc"] = roc_auc_score(conflict_true, probs_type.max(axis=1))
+        metrics["binary_auc"] = roc_auc_score(conflict_true, probs_type[:, conflict_indices].max(axis=1))
     except ValueError:
         metrics["binary_auc"] = float("nan")
 
