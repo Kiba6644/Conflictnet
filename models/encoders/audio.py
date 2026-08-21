@@ -262,11 +262,12 @@ class Emotion2VecEncoder(nn.Module):
 
     def _try_funasr(self):
         from funasr import AutoModel
-        self._model = AutoModel(
+        funasr_model = AutoModel(
             model=self.model_name,
             disable_update=True,
             disable_pipeline=True,
         )
+        self._funasr_wrapper = [funasr_model]
         self._backend = "funasr"
         logger.info(f"[Emotion2Vec] funasr backend: {self.model_name}")
 
@@ -282,7 +283,7 @@ class Emotion2VecEncoder(nn.Module):
         audio_np = audio.cpu().numpy()
         results = []
         for i in range(audio_np.shape[0]):
-            emb = self._model.generate(input=audio_np[i], output_dir="./tmp_funasr")
+            emb = self._funasr_wrapper[0].generate(input=audio_np[i], output_dir="./tmp_funasr")
             if isinstance(emb, list) and len(emb) > 0 and isinstance(emb[0], dict):
                 emb = emb[0].get("feats", emb[0])
             emb = np.mean(emb, axis=0) if emb.ndim > 1 else emb
