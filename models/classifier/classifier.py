@@ -63,8 +63,8 @@ class SpeakerAdaptiveThreshold(nn.Module):
         Returns:
             (B,) per-sample threshold offsets.
         """
-        offset = torch.sigmoid(self.net(speaker_feat)).squeeze(-1)  # (B,) in [0, 1]
-        return offset * self.max_offset
+        offset = torch.tanh(self.net(speaker_feat)).squeeze(-1)  # (B,) in [-1, 1]
+        return offset * (self.max_offset / 2)
 
 
 class ConflictClassifier(nn.Module):
@@ -129,6 +129,16 @@ class ConflictClassifier(nn.Module):
         # Multi-label subtype head (sigmoid — NOT softmax)
         self.type_head = nn.Linear(in_dim, n_types)
 
+        # DEDICATED sarcasm head — deeper, with its own dropout
+        # Trained exclusively on MUStARD++ via gated BCE in forward()
+        self.sarcasm_head = nn.Sequential(
+            nn.Linear(in_dim, 128),
+            nn.GELU(),
+            nn.LayerNorm(128),
+            nn.Dropout(0.2),
+            nn.Linear(128, 1),
+        )
+
         # Severity regression head (sigmoid → [0, 1])
         self.severity_proj = nn.Linear(in_dim, 1) if severity_head else None
 
@@ -159,6 +169,8 @@ class ConflictClassifier(nn.Module):
         feat = self.shared_mlp(x)
 
         logits_type = self.type_head(feat)       # (B, n_types)
+        sarcasm_logit = self.sarcasm_head(feat)  # (B, 1)
+        logits_type = torch.cat([sarcasm_logit, logits_type[:, 1:]], dim=-1) # (B, n_types)
         probs_type = torch.sigmoid(logits_type)  # (B, n_types)
 
         severity = None

@@ -441,6 +441,7 @@ class MUStARDDataset(Dataset):
                 "text": sample.get("utterance", ""),
                 "sarcasm": int(sample.get("sarcasm", 0)),
                 "speaker_id": sample.get("speaker", "unknown"),
+                "dataset_name": "mustard",
             })
 
         # Speaker-stratified split: group by speaker, assign whole speakers to train/val
@@ -496,6 +497,7 @@ class MUStARDDataset(Dataset):
             "utterance_id": Path(item["wav_path"]).stem,
             "word_timestamps": word_timestamps,
             "token_word_boundaries": token_word_boundaries,
+            "dataset_name": item.get("dataset_name", "unknown"),
         }
 
 
@@ -790,10 +792,11 @@ class MELDDataset(Dataset):
                     "dialogue_id": dia_id,
                     "utterance_id": int(utt_id) if utt_id.isdigit() else 0,
                     "conflict_binary": int(conflict),
-                    "conflict_type_labels": type_labels,  # 6-class: [anger, disgust, fear, happiness, neutral, sadness]
+                    "conflict_type_labels": [0] * N_EMOTION_CLASSES,
                     "severity": float(conflict),  # binary proxy; no real severity in MELD
                     "speaker_id": f"meld_{speaker}",
                     "gender": None,
+                    "dataset_name": "meld",
                 })
         if self.max_samples is not None and len(items) > self.max_samples:
             # Stratified subsample: preserve conflict/non-conflict ratio
@@ -848,6 +851,7 @@ class MELDDataset(Dataset):
             "turn_index": int(item["utterance_id"]),
             "word_timestamps": word_timestamps,
             "token_word_boundaries": token_word_boundaries,
+            "dataset_name": item.get("dataset_name", "unknown"),
         }
 
 
@@ -1310,6 +1314,7 @@ def _collate_core(
         "turn_indices": turn_indices,
         "word_timestamps": word_timestamps,
         "token_word_boundaries": token_word_boundaries,
+        "dataset_names": [b.get("dataset_name", "unknown") for b in batch],
     }
 
 

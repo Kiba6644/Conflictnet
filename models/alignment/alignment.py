@@ -193,6 +193,7 @@ class ContextGatedContrastiveLoss(nn.Module):
         text_embeds: torch.Tensor,
         context_pooled: Optional[torch.Tensor] = None,
         conflict_labels: Optional[torch.Tensor] = None,
+        sarcasm_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Compute context-gated contrastive + conflict separation loss.
 
@@ -201,6 +202,7 @@ class ContextGatedContrastiveLoss(nn.Module):
             text_embeds:  (B, D) L2-normalised text projections.
             context_pooled: (B, D) pooled dialogue context (from temporal module).
             conflict_labels: (B,) float — 1.0 for conflict pairs, 0.0 otherwise.
+            sarcasm_mask: (B,) bool — True if the sample is sarcasm.
 
         Returns:
             Scalar loss.
@@ -229,18 +231,25 @@ class ContextGatedContrastiveLoss(nn.Module):
         # Standard symmetric InfoNCE
         B = audio_embeds.size(0)
         labels = torch.arange(B, device=audio_embeds.device)
-        loss_a2t = F.cross_entropy(sim_a2t, labels)
-        loss_t2a = F.cross_entropy(sim_t2a, labels)
+        if sarcasm_mask is not None and sarcasm_mask.any():
+            labels = labels.clone()
+            labels[sarcasm_mask] = -1   # cross_entropy ignore_index=-1
+        loss_a2t = F.cross_entropy(sim_a2t, labels, ignore_index=-1)
+        loss_t2a = F.cross_entropy(sim_t2a, labels, ignore_index=-1)
         contrastive_loss = (loss_a2t + loss_t2a) / 2
 
         # Conflict separation loss: push paired audio↔text apart by margin
         # (uses un-scaled cosine similarities since margin is in cosine space)
         conflict_sep_loss = torch.tensor(0.0, device=audio_embeds.device)
         if conflict_labels is not None and conflict_labels.sum() > 0:
-            paired_sim = torch.diagonal(sim_raw)  # (B,) — un-scaled cosine sim
             conflict_mask = conflict_labels.bool()
-            conflict_sep_loss = F.relu(
-                paired_sim[conflict_mask] + self.conflict_margin
-            ).mean()
+            apply_sep = conflict_mask
+            if sarcasm_mask is not None:
+                apply_sep = conflict_mask & ~sarcasm_mask   # prosodic-only conflict
+            if apply_sep.any():
+                paired_sim = torch.diagonal(sim_raw)  # (B,) — un-scaled cosine sim
+                conflict_sep_loss = F.relu(
+                    paired_sim[apply_sep] + self.conflict_margin
+                ).mean()
 
         return contrastive_loss + conflict_sep_loss

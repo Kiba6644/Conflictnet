@@ -156,20 +156,21 @@ class ConflictNetTrainer:
         if hasattr(torch.optim.AdamW, "__init__") and "fused" in AdamW.__init__.__code__.co_varnames:
             kwargs["fused"] = True
 
-        self.optimizer = AdamW(
-            filter(lambda p: p.requires_grad, self.model.parameters()),
-            lr=lr,
-            weight_decay=0.01,
-            **kwargs
-        )
+        # Encoder params (LoRA adapters in DeBERTa)
+        encoder_params = [p for n, p in self.model.named_parameters()
+                          if p.requires_grad and "text_encoder" in n]
+        # Newly-initialized heads (projection, fusion, temporal, classifier)
+        head_params = [p for n, p in self.model.named_parameters()
+                       if p.requires_grad and "text_encoder" not in n]
+
+        self.optimizer = AdamW([
+            {"params": encoder_params, "lr": lr,       "name": "encoder"},
+            {"params": head_params,    "lr": lr * 10,  "name": "heads"},
+        ], weight_decay=0.01, **kwargs)
         steps_per_epoch = len(self.train_loader)
-        epochs = self.cfg.get("epochs", 30)
-        warmup = self.cfg.get("warmup_steps", 500)
-        self.scheduler = get_warmup_cosine_scheduler(
-            self.optimizer,
-            num_warmup_steps=warmup,
-            num_training_steps=steps_per_epoch * epochs,
-        )
+        epochs = self.cfg.get("epochs", 50)
+        from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
+        self.scheduler = CosineAnnealingWarmRestarts(self.optimizer, T_0=10, T_mult=2)
 
     def _setup_wandb(self):
         self.use_wandb = False
@@ -247,6 +248,7 @@ class ConflictNetTrainer:
                     severity_labels=batch.get("severity"),
                     conflict_binary_labels=batch.get("conflict_binary"),
                     pretraining=pretraining,
+                    dataset_names=batch.get("dataset_names"),
                 )
 
             # Update context cache with current turn fused embeddings
@@ -311,13 +313,15 @@ class ConflictNetTrainer:
 
     @torch.no_grad()
     def evaluate(self) -> Dict[str, float]:
-        from sklearn.metrics import f1_score  # type: ignore
+        from sklearn.metrics import average_precision_score, f1_score, roc_auc_score
 
         self.model.eval()
         # Clear context cache to prevent training dialogue context from
         # leaking into validation (fixes L3 data leakage path)
         self.ctx_cache.clear()
-        all_preds, all_labels = [], []
+        import numpy as np
+        all_probs = []
+        all_labels = []
 
         for batch in self.val_loader:
             batch = {
@@ -341,20 +345,27 @@ class ConflictNetTrainer:
                 word_timestamps=batch.get("word_timestamps"),
                 token_word_boundaries=batch.get("token_word_boundaries"),
             )
-            if output.conflict_flag is not None:
-                preds = output.conflict_flag.cpu().numpy().astype(int)
-            else:
-                import numpy as np
-                preds = np.zeros(batch["audio"].size(0), dtype=int)
-            conflict_binary = batch.get("conflict_binary")
-            if conflict_binary is None:
-                conflict_binary = torch.zeros(batch["audio"].size(0))  # type: ignore
-            labels = conflict_binary.cpu().numpy().astype(int)
-            all_preds.extend(preds.tolist())
-            all_labels.extend(labels.tolist())
+            all_probs.append(output.probs_type.float().cpu().numpy())
+            all_labels.append(batch["conflict_type_labels"].cpu().numpy())
 
-        f1 = float(f1_score(all_labels, all_preds, average="weighted", zero_division=0))  # type: ignore
-        return {"val/f1_weighted": f1}
+        probs = np.concatenate(all_probs)
+        labels = np.concatenate(all_labels)
+
+        ap_sarcasm = average_precision_score(labels[:, 0], probs[:, 0])
+        try:
+            auc_sarcasm = roc_auc_score(labels[:, 0], probs[:, 0])
+        except ValueError:
+            auc_sarcasm = 0.5  # handle case where all labels are 0 or 1
+        bin_pred = (probs[:, 0] > 0.5).astype(int)
+        bin_label = (labels[:, 0] > 0.5).astype(int)
+        f1 = f1_score(bin_label, bin_pred, zero_division=0)
+
+        return {
+            "val/ap_sarcasm": float(ap_sarcasm),
+            "val/auc_sarcasm": float(auc_sarcasm),
+            "val/f1_sarcasm": float(f1),
+            "val/f1_weighted": float(ap_sarcasm),  # hack to let existing best_val_f1 logic work with ap_sarcasm
+        }
 
     def train(
         self,

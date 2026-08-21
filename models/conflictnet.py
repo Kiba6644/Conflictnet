@@ -31,7 +31,18 @@ from .classifier import ConflictClassifier
 
 logger = logging.getLogger(__name__)
 
-
+def focal_bce_loss(logits, targets, alpha=0.75, gamma=2.0, pos_weight=None):
+    """Focal loss: down-weights easy negatives, focuses on hard sarcasm cases."""
+    bce = F.binary_cross_entropy_with_logits(
+        logits, targets, pos_weight=pos_weight, reduction="none"
+    )
+    probs = torch.sigmoid(logits)
+    pt = torch.where(targets > 0.5, probs, 1 - probs)   # p_t
+    focal_weight = (1 - pt) ** gamma
+    alpha_weight = torch.where(targets > 0.5,
+                               torch.full_like(targets, alpha),
+                               torch.full_like(targets, 1 - alpha))
+    return (alpha_weight * focal_weight * bce).mean()
 
 # ---------------------------------------------------------------------------
 # Output container
@@ -135,7 +146,10 @@ class MultiTaskLoss(nn.Module):
 
     def __init__(self, n_tasks: int = 4):
         super().__init__()
-        self.log_vars = nn.Parameter(torch.zeros(n_tasks))
+        init = torch.zeros(n_tasks)
+        if n_tasks > 2:
+            init[2] = 5.0   # severity: e^(-5) ≈ 0.007 weight, effectively disabled
+        self.log_vars = nn.Parameter(init)
 
     def forward(self, losses: List[torch.Tensor]) -> Tuple[torch.Tensor, Dict[str, float]]:
         total = torch.tensor(0.0, device=self.log_vars.device)
@@ -185,7 +199,8 @@ class ConflictNet(nn.Module):
         use_baseline_subtract: bool = True,
         lora_r: int = 16,
         lora_alpha: int = 32,
-        label_smoothing: float = 0.05,
+        label_smoothing: float = 0.01,
+        sarcasm_pos_weight: float = 8.0,
     ):
         super().__init__()
         self.embed_dim = embed_dim
@@ -197,6 +212,10 @@ class ConflictNet(nn.Module):
         self.use_speaker_adaptive_threshold = use_speaker_adaptive_threshold
         self.use_baseline_subtract = use_baseline_subtract
         self.label_smoothing = label_smoothing
+
+        pos_w = torch.ones(n_conflict_types)
+        pos_w[0] = sarcasm_pos_weight
+        self.register_buffer("pos_weight", pos_w)
 
         # 1. Encoders
         self.audio_encoder = build_audio_encoder(audio_encoder_name)
@@ -382,6 +401,7 @@ class ConflictNet(nn.Module):
         severity_labels: Optional[torch.Tensor] = None,       # (B, 1)
         conflict_binary_labels: Optional[torch.Tensor] = None, # (B,) for contrastive
         pretraining: bool = False,
+        dataset_names: Optional[List[str]] = None,
     ) -> ConflictNetOutput:
 
         # 1. Encode (all pure-torch — numpy preprocessing done in collate_fn)
@@ -461,22 +481,47 @@ class ConflictNet(nn.Module):
             losses = []
 
             # 6a. Contrastive loss
+            sarcasm_mask = None
+            if conflict_type_labels is not None:
+                sarcasm_mask = conflict_type_labels[:, 0].bool()
+
             cl = self.contrastive_loss_fn(
                 audio_embed, text_embed,
                 context_pooled=context_pooled,
                 conflict_labels=conflict_binary_labels,
+                sarcasm_mask=sarcasm_mask,
             )
             losses.append(cl)
 
             # 6b. Multi-label BCE loss for conflict types (with label smoothing)
             if conflict_type_labels is not None:
-                # Label smoothing: clamp soft targets to [eps, 1-eps] to prevent
-                # overconfidence and improve calibration on unseen examples.
                 eps = self.label_smoothing
                 smooth_labels = conflict_type_labels.float().clamp(eps, 1.0 - eps)
-                type_loss = nn.functional.binary_cross_entropy_with_logits(
-                    logits_type, smooth_labels
-                )
+                if dataset_names is not None:
+                    mustard_mask = torch.tensor(
+                        [n == "mustard" for n in dataset_names],
+                        dtype=torch.bool, device=audio.device
+                    )
+                else:
+                    mustard_mask = torch.ones(audio.size(0), dtype=torch.bool, device=audio.device)
+
+                if mustard_mask.any():
+                    # Sarcasm slot: focal loss
+                    sarc_logits = logits_type[mustard_mask, 0:1]
+                    sarc_labels = smooth_labels[mustard_mask, 0:1]
+                    sarc_loss = focal_bce_loss(sarc_logits, sarc_labels,
+                                                alpha=0.75, gamma=2.0,
+                                                pos_weight=self.pos_weight[0:1].to(audio.device))
+
+                    # Other slots: standard BCE
+                    other_logits = logits_type[mustard_mask, 1:]
+                    other_labels = smooth_labels[mustard_mask, 1:]
+                    other_loss = F.binary_cross_entropy_with_logits(other_logits, other_labels)
+
+                    type_loss = sarc_loss + 0.1 * other_loss
+                else:
+                    type_loss = torch.tensor(0.0, device=audio.device)
+
                 losses.append(type_loss)
             else:
                 losses.append(torch.tensor(0.0, device=audio.device))
