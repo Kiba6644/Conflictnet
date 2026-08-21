@@ -171,13 +171,24 @@ def find_meld_root(requested_root: Path, explicit_mount: Optional[str] = None) -
                 print(f"[MELD] 📦 Unpacking {tar_name} into {target_root} ...", flush=True)
                 run(["tar", "-xzf", str(tar_file), "-C", str(target_root)])
 
-        # Ensure CSVs are at target_root
+        # Ensure CSVs are at target_root (search subdirs/parent or fetch 1MB CSV directly)
         for csv_name in ["train_sent_emo.csv", "dev_sent_emo.csv", "test_sent_emo.csv"]:
-            if not (target_root / csv_name).exists():
-                for sub in [target_root / "train", target_root / "dev", target_root / "test"]:
-                    if (sub / csv_name).exists():
-                        shutil.copy2(str(sub / csv_name), str(target_root / csv_name))
+            dst = target_root / csv_name
+            if not dst.exists():
+                found = False
+                for search_dir in [mounted_path.parent, target_root / "train", target_root / "dev", target_root / "test"]:
+                    if (search_dir / csv_name).exists():
+                        shutil.copy2(str(search_dir / csv_name), str(dst))
+                        found = True
                         break
+                if not found:
+                    csv_url = f"https://raw.githubusercontent.com/declare-lab/MELD/master/data/MELD/{csv_name}"
+                    print(f"[MELD] 📥 Fetching missing metadata {csv_name} (1 MB) from official repository ...", flush=True)
+                    try:
+                        import urllib.request
+                        urllib.request.urlretrieve(csv_url, str(dst))
+                    except Exception as e:
+                        print(f"[MELD] Warning: could not fetch {csv_name}: {e}")
 
         return target_root
 
@@ -187,7 +198,24 @@ def find_meld_root(requested_root: Path, explicit_mount: Optional[str] = None) -
 def download_meld(meld_root: Path, explicit_mount: Optional[str] = None) -> Path:
     """Prepare MELD from mounted dataset or download if missing."""
     target_root = find_meld_root(meld_root, explicit_mount=explicit_mount)
-    if (target_root / "train_sent_emo.csv").exists() or (target_root / "train" / "train_sent_emo.csv").exists():
+    has_csv = (target_root / "train_sent_emo.csv").exists() or (target_root / "train" / "train_sent_emo.csv").exists()
+    has_videos = (target_root / "train_splits").exists() or (target_root / "train").exists() or (target_root / "dev_splits_complete").exists()
+
+    if has_csv:
+        print(f"[MELD] Dataset ready at {target_root}.")
+        return target_root
+
+    # If videos exist but CSV was missing, fetch CSV
+    if has_videos and not has_csv:
+        for csv_name in ["train_sent_emo.csv", "dev_sent_emo.csv", "test_sent_emo.csv"]:
+            dst = target_root / csv_name
+            if not dst.exists():
+                csv_url = f"https://raw.githubusercontent.com/declare-lab/MELD/master/data/MELD/{csv_name}"
+                try:
+                    import urllib.request
+                    urllib.request.urlretrieve(csv_url, str(dst))
+                except Exception:
+                    pass
         print(f"[MELD] Dataset ready at {target_root}.")
         return target_root
 
