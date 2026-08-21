@@ -398,36 +398,27 @@ class MUStARDDataset(Dataset):
         wav_index: Dict[str, Path] = {}
         valid_exts = {".wav", ".mp4", ".mkv", ".avi", ".mp3", ".flac", ".m4a", ".aac"}
         
-        search_dirs = [wav_search_root]
-        if not wav_search_root.exists():
-            kaggle_input = Path("/kaggle/input")
-            if kaggle_input.exists():
-                search_dirs.append(kaggle_input)
-            search_dirs.append(self.root)
-
-        import os
-        for s_dir in search_dirs:
-            if s_dir.exists():
-                logger.info(f"[MUStARD++] Indexing media files in {s_dir}...")
-                try:
-                    for root, dirs, files in os.walk(str(s_dir)):
-                        if ".git" in dirs:
-                            dirs.remove(".git")  # Skip massive git history
-                        for f in files:
-                            if f.lower().endswith(tuple(valid_exts)):
-                                p = Path(root) / f
-                                wav_index[p.stem] = p
-                                wav_index[p.name] = p
-                                if p.stem.endswith("_u"):
-                                    wav_index[p.stem[:-2]] = p
-                except Exception as e:
-                    logger.warning(f"[MUStARD++] Error scanning {s_dir}: {e}")
-                if wav_index:
-                    logger.info(f"[MUStARD++] Indexed {len(wav_index)} media files from {s_dir}")
-                    break
+        if wav_search_root.exists():
+            logger.info(f"[MUStARD++] Indexing media files in {wav_search_root}...")
+            try:
+                import os
+                for root, dirs, files in os.walk(str(wav_search_root)):
+                    if ".git" in dirs:
+                        dirs.remove(".git")
+                    for f in files:
+                        if f.lower().endswith(tuple(valid_exts)):
+                            p = Path(root) / f
+                            wav_index[p.stem] = p
+                            wav_index[p.name] = p
+                            if p.stem.endswith("_u"):
+                                wav_index[p.stem[:-2]] = p
+            except Exception as e:
+                logger.warning(f"[MUStARD++] Error scanning {wav_search_root}: {e}")
+            if wav_index:
+                logger.info(f"[MUStARD++] Indexed {len(wav_index)} media files from {wav_search_root}")
 
         if not wav_index:
-            logger.warning(f"[MUStARD++] WARNING: 0 media files found in {search_dirs}! Dataset will be empty.")
+            logger.warning(f"[MUStARD++] WARNING: 0 media files found in {wav_search_root}! Dataset will be empty.")
 
         all_samples = []
         for key, sample in data.items():
@@ -698,32 +689,30 @@ class MELDDataset(Dataset):
         split_map = {"train": "train", "val": "dev", "test": "test"}
         split_name = split_map.get(self.split, self.split)
         
-        # Look for CSV in standard or root locations
+        # Look for CSV in standard locations
         csv_candidates = [
             self.root / split_name / f"{split_name}_sent_emo.csv",
             self.root / f"{split_name}_sent_emo.csv",
+            self.root / f"{self.split}_sent_emo.csv",
         ]
         csv_path = None
         for c in csv_candidates:
             if c.exists():
                 csv_path = c
                 break
-        if csv_path is None:
-            # Fallback search
-            for p in self.root.rglob(f"{split_name}_sent_emo.csv"):
-                csv_path = p
-                break
 
         if csv_path is None or not csv_path.exists():
             logger.warning(f"[MELD] CSV not found in {self.root} for split {split_name}")
             return []
 
-        # Index all audio/video files (.wav, .mp4, etc.)
+        # Index all audio/video files (.wav, .mp4, etc.) in direct target directories
         valid_exts = {".wav", ".mp4", ".flac", ".m4a", ".mp3", ".mkv", ".avi"}
         media_index: Dict[str, Path] = {}
         search_dirs = [
             self.root / split_name / f"{split_name}_splits",
             self.root / f"{split_name}_splits",
+            self.root / f"{split_name}_splits_complete",
+            self.root / "output_repeated_splits_test" if split_name == "test" else self.root / "train_splits",
             self.root / split_name,
             self.root,
         ]

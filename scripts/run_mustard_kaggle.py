@@ -99,27 +99,36 @@ def download_fast(url: str, output_path: Path) -> None:
         run(cmd, silent=True)
 
 
-def find_mustard_clips_dir(requested_dir: Path) -> Path:
-    """Find MUStARD clips if already present in requested_dir or /kaggle/input."""
-    if requested_dir.exists():
-        media_files = list(requested_dir.rglob("*.mp4")) + list(requested_dir.rglob("*.wav"))
-        if media_files:
-            return requested_dir
+MUSTARD_KAGGLE_INPUTS = [
+    Path("/kaggle/input/mustard-sarcasm-detection/MUStARD/data/clips"),
+    Path("/kaggle/input/mustard-sarcasm-detection/MUStARD/data"),
+    Path("/kaggle/input/mustard-sarcasm-detection"),
+    Path("/kaggle/input/notebooks/nith27/mustard-sarcasm-detection"),
+]
 
-    kaggle_input = Path("/kaggle/input")
-    if kaggle_input.exists():
-        media_files = list(kaggle_input.rglob("*.mp4")) + list(kaggle_input.rglob("*.wav"))
-        if media_files:
-            candidate = media_files[0].parent
-            print(f"[MUStARD] 🚀 Found {len(media_files)} clips in attached Kaggle input: {candidate} (0s load time)")
+
+def find_mustard_clips_dir(requested_dir: Path, explicit_mount: Optional[str] = None) -> Path:
+    """Find MUStARD clips from explicit mount, hardcoded Kaggle paths, or requested_dir."""
+    if explicit_mount:
+        exp_path = Path(explicit_mount)
+        if exp_path.exists():
+            print(f"[MUStARD] 🚀 Found explicit mounted clips at {exp_path}")
+            return exp_path
+
+    if requested_dir.exists() and any(requested_dir.iterdir()):
+        return requested_dir
+
+    for candidate in MUSTARD_KAGGLE_INPUTS:
+        if candidate.exists():
+            print(f"[MUStARD] 🚀 Found attached Kaggle dataset at {candidate} (0s load time)")
             return candidate
 
     return requested_dir
 
 
-def download_mustard_clips(clips_dir: Path) -> Path:
+def download_mustard_clips(clips_dir: Path, explicit_mount: Optional[str] = None) -> Path:
     """Download and extract MUStARD raw video clips with multi-stream high speed."""
-    clips_dir = find_mustard_clips_dir(clips_dir)
+    clips_dir = find_mustard_clips_dir(clips_dir, explicit_mount=explicit_mount)
     if clips_dir.exists():
         media_files = list(clips_dir.rglob("*.mp4")) + list(clips_dir.rglob("*.wav"))
         if media_files:
@@ -166,6 +175,8 @@ def main():
     p = argparse.ArgumentParser(description="Kaggle MUStARD training runner")
     p.add_argument("--mustard_clips_dir", type=str, default="/kaggle/working/mustard_clips",
                    help="Where to download/extract MUStARD video clips")
+    p.add_argument("--mustard_mount", type=str, default=None,
+                   help="Explicit path to mounted MUStARD clips (e.g. /kaggle/input/mustard-sarcasm-detection/MUStARD/data/clips)")
     p.add_argument("--output_dir", type=str, default="/kaggle/working/output_mustard")
     p.add_argument("--audio_encoder", type=str, default="wavlm_weighted",
                    choices=["emotion2vec", "wavlm", "wavlm_weighted", "wav2vec2"])
@@ -181,9 +192,9 @@ def main():
 
     # Step 1: Download / locate MUStARD clips
     if not args.skip_download:
-        clips_dir = download_mustard_clips(clips_dir)
+        clips_dir = download_mustard_clips(clips_dir, explicit_mount=args.mustard_mount)
     else:
-        clips_dir = find_mustard_clips_dir(clips_dir)
+        clips_dir = find_mustard_clips_dir(clips_dir, explicit_mount=args.mustard_mount)
 
     # Step 2: Warm up pretrained models (single-process, before torchrun)
     import torch

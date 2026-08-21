@@ -93,27 +93,70 @@ def download_fast(url: str, output_path: Path) -> None:
         run(cmd, silent=True)
 
 
-def find_meld_root(requested_root: Path) -> Path:
-    """Find MELD dataset if already extracted or mounted in /kaggle/input."""
-    if (requested_root / "train" / "train_sent_emo.csv").exists():
+MELD_KAGGLE_INPUTS = [
+    Path("/kaggle/input/notebooks/nith27/meld-dataset/MELD.Raw"),
+    Path("/kaggle/input/notebooks/nith27/meld-dataset"),
+    Path("/kaggle/input/meld-dataset/MELD.Raw"),
+    Path("/kaggle/input/meld-dataset"),
+]
+
+
+def find_meld_root(requested_root: Path, explicit_mount: Optional[str] = None) -> Path:
+    """Find MELD dataset from explicit mount, hardcoded Kaggle mount paths, or requested_root."""
+    if (requested_root / "train_sent_emo.csv").exists() or (requested_root / "train" / "train_sent_emo.csv").exists():
         return requested_root
 
-    kaggle_input = Path("/kaggle/input")
-    if kaggle_input.exists():
-        for p in kaggle_input.rglob("train_sent_emo.csv"):
-            candidate = p.parent.parent
-            if (candidate / "dev" / "dev_sent_emo.csv").exists() or (candidate / "train" / "train_sent_emo.csv").exists():
-                print(f"[MELD] 🚀 Found attached Kaggle dataset at {candidate} (0s load time)")
-                return candidate
+    search_mounts = []
+    if explicit_mount:
+        search_mounts.append(Path(explicit_mount))
+    search_mounts.extend(MELD_KAGGLE_INPUTS)
+
+    # Check mounted Kaggle inputs
+    mounted_path = None
+    for candidate in search_mounts:
+        if candidate.exists():
+            if (candidate / "MELD.Raw").exists() and candidate.name != "MELD.Raw":
+                candidate = candidate / "MELD.Raw"
+            mounted_path = candidate
+            break
+
+    if mounted_path is not None:
+        import shutil
+        requested_root.mkdir(parents=True, exist_ok=True)
+        print(f"[MELD] 🚀 Found mounted Kaggle dataset at {mounted_path}")
+
+        # Copy CSVs if directly in mounted dir
+        for csv_name in ["train_sent_emo.csv", "dev_sent_emo.csv", "test_sent_emo.csv"]:
+            src = mounted_path / csv_name
+            dst = requested_root / csv_name
+            if src.exists() and not dst.exists():
+                shutil.copy2(str(src), str(dst))
+
+        # Unpack inner tar archives (train.tar.gz, dev.tar.gz, test.tar.gz) into working dir
+        for tar_name in ["train.tar.gz", "dev.tar.gz", "test.tar.gz"]:
+            tar_file = mounted_path / tar_name
+            if tar_file.exists():
+                print(f"[MELD] 📦 Unpacking {tar_name} into {requested_root} ...", flush=True)
+                run(["tar", "-xzf", str(tar_file), "-C", str(requested_root)])
+
+        # Ensure CSVs are at requested_root
+        for csv_name in ["train_sent_emo.csv", "dev_sent_emo.csv", "test_sent_emo.csv"]:
+            if not (requested_root / csv_name).exists():
+                for sub in [requested_root / "train", requested_root / "dev", requested_root / "test"]:
+                    if (sub / csv_name).exists():
+                        shutil.copy2(str(sub / csv_name), str(requested_root / csv_name))
+                        break
+
+        return requested_root
 
     return requested_root
 
 
-def download_meld(meld_root: Path) -> Path:
-    """Download and extract MELD using high-speed multi-connection transfer."""
-    meld_root = find_meld_root(meld_root)
-    if (meld_root / "train" / "train_sent_emo.csv").exists():
-        print(f"[MELD] Dataset ready at {meld_root}, skipping download.")
+def download_meld(meld_root: Path, explicit_mount: Optional[str] = None) -> Path:
+    """Prepare MELD from mounted dataset or download if missing."""
+    meld_root = find_meld_root(meld_root, explicit_mount=explicit_mount)
+    if (meld_root / "train_sent_emo.csv").exists() or (meld_root / "train" / "train_sent_emo.csv").exists():
+        print(f"[MELD] Dataset ready at {meld_root}.")
         return meld_root
 
     meld_root.mkdir(parents=True, exist_ok=True)
@@ -127,15 +170,6 @@ def download_meld(meld_root: Path) -> Path:
     if tar_path.exists():
         tar_path.unlink()
 
-    # Verify expected structure
-    for split, csv_name in [
-        ("train", "train_sent_emo.csv"),
-        ("dev", "dev_sent_emo.csv"),
-        ("test", "test_sent_emo.csv"),
-    ]:
-        p = meld_root / split / csv_name
-        if not p.exists():
-            raise RuntimeError(f"[MELD] Expected file not found after extraction: {p}")
     print("[MELD] ✅ Dataset ready.")
     return meld_root
 
@@ -162,6 +196,8 @@ def main():
     p = argparse.ArgumentParser(description="Kaggle MELD training runner")
     p.add_argument("--meld_root", type=str, default="/kaggle/working/meld",
                    help="Where to download/extract MELD")
+    p.add_argument("--meld_mount", type=str, default=None,
+                   help="Explicit path to mounted MELD dataset (e.g. /kaggle/input/notebooks/nith27/meld-dataset/MELD.Raw)")
     p.add_argument("--output_dir", type=str, default="/kaggle/working/output_meld")
     p.add_argument("--audio_encoder", type=str, default="wavlm_weighted",
                    choices=["emotion2vec", "wavlm", "wavlm_weighted", "wav2vec2"])
@@ -177,9 +213,9 @@ def main():
 
     # Step 1: Download / locate MELD
     if not args.skip_download:
-        meld_root = download_meld(meld_root)
+        meld_root = download_meld(meld_root, explicit_mount=args.meld_mount)
     else:
-        meld_root = find_meld_root(meld_root)
+        meld_root = find_meld_root(meld_root, explicit_mount=args.meld_mount)
 
     # Step 2: Warm up pretrained models (single-process, before torchrun)
     import torch
