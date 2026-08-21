@@ -416,20 +416,17 @@ class MUStARDDataset(Dataset):
             logger.info(f"[MUStARD++] Indexing media files in {wav_search_root}...")
             try:
                 import os
-                for root, dirs, files in os.walk(str(wav_search_root)):
-                    if ".git" in dirs:
-                        dirs.remove(".git")
-                    for f in files:
-                        if f.lower().endswith(tuple(valid_exts)):
-                            p = Path(root) / f
-                            wav_index[p.stem] = p
-                            wav_index[p.name] = p
-                            if p.stem.endswith("_u"):
-                                wav_index[p.stem[:-2]] = p
+                for f in os.listdir(str(wav_search_root)):
+                    p = Path(wav_search_root) / f
+                    if p.is_file() and p.suffix.lower() in valid_exts:
+                        wav_index[p.stem] = p
+                        wav_index[p.name] = p
+                        if p.stem.endswith("_u"):
+                            wav_index[p.stem[:-2]] = p
             except Exception as e:
                 logger.warning(f"[MUStARD++] Error scanning {wav_search_root}: {e}")
             if wav_index:
-                logger.info(f"[MUStARD++] Indexed {len(wav_index)} media files from {wav_search_root}")
+                logger.info(f"[MUStARD++] Indexed {len(wav_index)} media files from {wav_search_root} (non-recursive)")
 
         if not wav_index:
             logger.warning(f"[MUStARD++] WARNING: 0 media files found in {wav_search_root}! Dataset will be empty.")
