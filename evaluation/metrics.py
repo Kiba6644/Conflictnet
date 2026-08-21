@@ -105,6 +105,7 @@ def compute_all_metrics(
 
 def print_metrics(metrics: Dict[str, Any], prefix: str = ""):
     """Pretty-print metrics table."""
+    import sys
     title = prefix or "ConflictNet Evaluation Results"
     print("\n" + "=" * 50)
     print(title)
@@ -112,3 +113,4 @@ def print_metrics(metrics: Dict[str, Any], prefix: str = ""):
     for k, v in sorted(metrics.items()):
         print(f"  {k:25s}: {v:.4f}")
     print("=" * 50 + "\n")
+    sys.stdout.flush()
