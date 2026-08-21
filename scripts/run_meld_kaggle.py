@@ -25,6 +25,8 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 os.environ["PYTORCH_JIT"] = "0"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["PYTHONUNBUFFERED"] = "1"
+os.environ["WANDB_DISABLED"] = "true"
+os.environ["WANDB_SILENT"] = "true"
 
 # Point HF / SpeechBrain caches to /tmp so the working dir stays clean
 HF_CACHE = "/tmp/hf_cache"
