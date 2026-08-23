@@ -475,4 +475,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        # torchrun otherwise reports only a generic ChildFailedError after it
+        # terminates the other workers, obscuring the rank-local root cause.
+        logger.exception("Fatal training error on local rank %s", os.environ.get("LOCAL_RANK", "0"))
+        raise
