@@ -177,6 +177,7 @@ def main():
         # before the old, model-only barrier below is reached.  Build every
         # pretrained component once on rank zero before *any* dataset or model
         # constructor runs in another worker.
+        backends_list = [{"audio": "auto", "text": "auto", "lora": "auto"}]
         if local_rank == 0:
             logger.info("[DDP] Rank 0 pre-warming pretrained model and tokenizer caches...")
             rng_state = torch.get_rng_state()
@@ -188,6 +189,12 @@ def main():
             # the first build (notably PEFT / pretrained encoder initialisation),
             # while every other rank builds only once from the warmed cache.
             prewarmed_model = _build_model()
+            
+            backends_list[0] = {
+                "audio": getattr(prewarmed_model.audio_encoder, "_backend", "auto"),
+                "text": getattr(prewarmed_model.text_encoder, "_backend", "auto"),
+                "lora": getattr(prewarmed_model.text_encoder, "_lora_backend", "auto"),
+            }
             
             # Pre-warm tokenizer (used by all datasets)
             from transformers import AutoTokenizer
@@ -202,6 +209,13 @@ def main():
                     torch.cuda.set_rng_state_all(cuda_rng_states)
             torch.set_rng_state(rng_state)
             logger.info("[DDP] Pre-warm complete — releasing the remaining ranks.")
+            
+        torch.distributed.broadcast_object_list(backends_list, src=0)
+        os.environ["CONFLICTNET_WAVLM_BACKEND"] = backends_list[0]["audio"]
+        os.environ["CONFLICTNET_EMOTION2VEC_BACKEND"] = backends_list[0]["audio"]
+        os.environ["CONFLICTNET_TEXT_BACKEND"] = backends_list[0]["text"]
+        os.environ["CONFLICTNET_LORA_BACKEND"] = backends_list[0]["lora"]
+
         torch.distributed.barrier()
 
     # --- Build datasets ---
