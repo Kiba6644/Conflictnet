@@ -35,6 +35,11 @@ os.environ["NCCL_IB_DISABLE"] = "1"
 
 import torch
 from torch.utils.data import DataLoader, ConcatDataset
+try:
+    from torch.distributed.elastic.multiprocessing.errors import record
+except ImportError:
+    def record(fn):
+        return fn
 
 # Add project root to sys.path so 'data', 'models' etc. can be imported
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -113,6 +118,7 @@ def parse_args(argv=None):
     return p.parse_args()
 
 
+@record
 def main():
     args = parse_args(argv=None)
     
