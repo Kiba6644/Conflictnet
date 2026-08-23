@@ -28,12 +28,6 @@ os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 os.environ["TQDM_DISABLE"] = "1"
 os.environ["TRANSFORMERS_VERBOSITY"] = "error"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
-# FunASR downloads emotion2vec through ModelScope rather than the Hugging Face
-# cache. Keep it in a single, explicitly shared cache for all torchrun ranks.
-os.environ.setdefault(
-    "MODELSCOPE_CACHE",
-    os.path.join(os.environ.get("HF_HOME", os.path.join(os.path.expanduser("~"), ".cache")), "modelscope"),
-)
 
 import torch
 from torch.utils.data import DataLoader, ConcatDataset
