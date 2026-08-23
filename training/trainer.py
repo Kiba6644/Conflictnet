@@ -12,6 +12,7 @@ Supports:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 import os
@@ -92,20 +93,32 @@ class ConflictNetTrainer:
                 # fallback encoder because a HuggingFace/SpeechBrain download raced
                 # across torchrun workers). Otherwise DDP crashes deep inside with a
                 # cryptic "inconsistent params" error that is hard to diagnose.
+                model_signature = "|".join(
+                    f"{name}:{tuple(param.shape)}:{param.dtype}:{param.requires_grad}"
+                    for name, param in self.model.named_parameters()
+                )
+                signature_digest = torch.tensor(
+                    list(hashlib.sha256(model_signature.encode("utf-8")).digest()),
+                    dtype=torch.uint8,
+                    device=device,
+                )
+                world_size = torch.distributed.get_world_size()
+                gathered = [torch.zeros_like(signature_digest) for _ in range(world_size)]
+                torch.distributed.all_gather(gathered, signature_digest)
+                signatures = [bytes(t.cpu().tolist()).hex()[:12] for t in gathered]
                 n_trainable_tensors = torch.tensor(
                     [sum(1 for p in self.model.parameters() if p.requires_grad)],
                     device=device,
                 )
-                world_size = torch.distributed.get_world_size()
-                gathered = [torch.zeros_like(n_trainable_tensors) for _ in range(world_size)]
-                torch.distributed.all_gather(gathered, n_trainable_tensors)
-                counts = [int(t.item()) for t in gathered]
-                if any(c != counts[0] for c in counts):
+                gathered_counts = [torch.zeros_like(n_trainable_tensors) for _ in range(world_size)]
+                torch.distributed.all_gather(gathered_counts, n_trainable_tensors)
+                counts = [int(count.item()) for count in gathered_counts]
+                if any(signature != signatures[0] for signature in signatures):
                     raise RuntimeError(
-                        f"Ranks built different models (trainable tensor counts: {counts}). "
-                        "A HuggingFace/SpeechBrain download likely raced across torchrun "
-                        "workers and one rank fell back to a different encoder. Warm up all "
-                        "pretrained models in a single process before launching training."
+                        "Ranks built different trainable model structures "
+                        f"(tensor counts: {counts}; signatures: {signatures}). "
+                        "A pretrained-model fallback differed between ranks. Ensure every "
+                        "rank uses the shared Hugging Face and ModelScope caches."
                     )
 
                 self.model = nn.parallel.DistributedDataParallel(

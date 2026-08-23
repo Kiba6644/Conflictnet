@@ -107,7 +107,10 @@ class WavLMEncoder(nn.Module):
             model_name = local_path
             logger.info(f"[WavLM] Using local path: {local_path}")
         self._encoder = None
-        self.output_dim = 768
+        # microsoft/wavlm-large exposes 1024 features.  The old 768-d fallback
+        # made a rank that missed the cached checkpoint construct a different
+        # projection head from a rank that loaded it successfully.
+        self.output_dim = 1024
         try:
             from transformers import WavLMModel
             enc = WavLMModel.from_pretrained(model_name)
@@ -245,20 +248,36 @@ class WavLMWeightedEncoder(nn.Module):
 
 
 class Emotion2VecEncoder(nn.Module):
-    """Emotion2Vec — tries funasr, then WavLM, then spectrogram fallback."""
+    """Emotion2Vec via FunASR, with WavLM only as an actual fallback.
+
+    Do not initialise WavLM before FunASR.  Emotion2Vec uses the FunASR output
+    when available, so eagerly constructing an otherwise-unused WavLM added a
+    second pretrained download and could give DDP ranks different registered
+    parameter sets when only one rank fell back to a spectrogram encoder.
+    """
 
     def __init__(
         self,
         model_name: str = "iic/emotion2vec_plus_large",
         freeze: bool = True,
+        embedding_dim: int = 1024,
     ):
         super().__init__()
         self.model_name = model_name
         self._freeze = freeze
-        self._model = WavLMEncoder(freeze=freeze)
-        self.output_dim = self._model.output_dim
-        self._backend = "fallback_wavlm"
-        self._try_funasr()
+        self.output_dim = embedding_dim
+        self._model = None
+        self._funasr_wrapper = []
+        self._backend = "funasr"
+        try:
+            self._try_funasr()
+        except Exception as e:
+            logger.warning(
+                f"[Emotion2Vec] FunASR unavailable ({e}); using WavLM fallback"
+            )
+            self._model = WavLMEncoder(freeze=freeze)
+            self.output_dim = self._model.output_dim
+            self._backend = "fallback_wavlm"
 
     def _try_funasr(self):
         from funasr import AutoModel
@@ -292,8 +311,12 @@ class Emotion2VecEncoder(nn.Module):
 
     @property
     def device(self) -> torch.device:
-        if self._backend == "funasr" and hasattr(self._model, "device"):
-            return self._model.device
+        if self._backend == "funasr":
+            # FunASR accepts NumPy input and its model is deliberately kept out
+            # of nn.Module registration, so the caller's input device is used.
+            return torch.device("cpu")
+        if self._model is None:
+            return torch.device("cpu")
         return next(self._model.parameters()).device
 
 

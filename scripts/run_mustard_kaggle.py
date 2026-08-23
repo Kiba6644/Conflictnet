@@ -42,6 +42,8 @@ os.environ["HF_HOME"] = HF_CACHE
 os.environ["HF_HUB_CACHE"] = str(Path(HF_CACHE) / "hub")
 os.environ["TRANSFORMERS_CACHE"] = str(Path(HF_CACHE) / "hub")
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+# Emotion2Vec is downloaded by FunASR/ModelScope, not huggingface_hub.
+os.environ["MODELSCOPE_CACHE"] = str(Path(HF_CACHE) / "modelscope")
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
