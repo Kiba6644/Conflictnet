@@ -57,7 +57,11 @@ def parse_args(argv=None):
     p.add_argument("--cremad_root", type=str, default=None, help="CREMA-D dataset root")
     p.add_argument("--meld_root", type=str, default=None, help="MELD dataset root")
     p.add_argument("--meld_max_samples", type=int, default=None,
-                   help="Cap MELD dataset to this many samples (stratified); set to 700 to match MUStARD scale")
+                   help="Legacy arg, use meld_max_train_samples instead")
+    p.add_argument("--meld_max_train_samples", type=int, default=None,
+                   help="Cap MELD train split to this many samples (stratified)")
+    p.add_argument("--meld_max_val_samples", type=int, default=None,
+                   help="Cap MELD val split to this many samples (stratified)")
     p.add_argument("--musan_path", type=str, default=None, help="MUSAN corpus for noise augmentation")
     p.add_argument("--output_dir", type=str, default="checkpoints")
     p.add_argument("--audio_encoder", type=str, default="emotion2vec",
@@ -258,13 +262,20 @@ def main():
 
     if args.meld_root:
         logger.info(f"[Rank {local_rank}] Loading MELD dataset...")
-        meld_kwargs = {"max_samples": args.meld_max_samples} if args.meld_max_samples else {}
+        train_max = args.meld_max_train_samples or args.meld_max_samples
+        val_max = args.meld_max_val_samples or args.meld_max_samples
+        
+        meld_train_kwargs = {"max_samples": train_max} if train_max else {}
+        meld_val_kwargs = {"max_samples": val_max} if val_max else {}
+        
         if args.tokenizer_path:
-            meld_kwargs["tokenizer_name"] = args.tokenizer_path
+            meld_train_kwargs["tokenizer_name"] = args.tokenizer_path
+            meld_val_kwargs["tokenizer_name"] = args.tokenizer_path
+            
         logger.info(f"[Rank {local_rank}] Initializing MELD train...")
-        train_datasets.append(MELDDataset(args.meld_root, split="train", **meld_kwargs))
+        train_datasets.append(MELDDataset(args.meld_root, split="train", **meld_train_kwargs))
         logger.info(f"[Rank {local_rank}] Initializing MELD val...")
-        val_datasets.append(MELDDataset(args.meld_root, split="val", **meld_kwargs))
+        val_datasets.append(MELDDataset(args.meld_root, split="val", **meld_val_kwargs))
         logger.info(f"[Rank {local_rank}] MELD loaded.")
 
     logger.info(f"[Rank {local_rank}] Finished loading all dataset components.")
