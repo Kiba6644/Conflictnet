@@ -311,14 +311,24 @@ class Emotion2VecEncoder(nn.Module):
 
     def _try_funasr(self):
         from funasr import AutoModel
+        
+        device_str = "cpu"
+        if torch.cuda.is_available():
+            # Explicitly bind to the current local rank device, otherwise FunASR 
+            # defaults to cuda:0 for all ranks, causing massive GPU deadlocks.
+            device_str = f"cuda:{torch.cuda.current_device()}"
+            
         funasr_model = AutoModel(
             model=self.model_name,
+            device=device_str,
             disable_update=True,
             disable_pipeline=True,
+            disable_pbar=True,
+            disable_log=True,
         )
         self._funasr_wrapper = [funasr_model]
         self._backend = "funasr"
-        logger.info(f"[Emotion2Vec] funasr backend: {self.model_name}")
+        logger.info(f"[Emotion2Vec] funasr backend: {self.model_name} on {device_str}")
 
     def forward(self, audio, attention_mask=None, return_frames=False):
         if self._backend == "funasr":
@@ -332,7 +342,12 @@ class Emotion2VecEncoder(nn.Module):
         audio_np = audio.cpu().numpy()
         results = []
         for i in range(audio_np.shape[0]):
-            emb = self._funasr_wrapper[0].generate(input=audio_np[i], output_dir="./tmp_funasr")
+            emb = self._funasr_wrapper[0].generate(
+                input=audio_np[i], 
+                output_dir=None,  # Prevent DDP file I/O race conditions
+                disable_pbar=True,
+                disable_log=True
+            )
             if isinstance(emb, list) and len(emb) > 0 and isinstance(emb[0], dict):
                 emb = emb[0].get("feats", emb[0])
             emb = np.mean(emb, axis=0) if emb.ndim > 1 else emb
