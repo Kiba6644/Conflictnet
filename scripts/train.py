@@ -432,7 +432,7 @@ def main():
     param_counts = model.count_parameters()
     total_trainable = sum(v["trainable"] for v in param_counts.values())
     logger.info(f"Total trainable parameters: {total_trainable:,}")
-    if is_ddp:
+    if is_ddp_run:
         trainable_tensors = {
             name: sum(1 for p in module.parameters() if p.requires_grad)
             for name, module in model.named_children()
