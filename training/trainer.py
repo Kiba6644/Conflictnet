@@ -288,7 +288,7 @@ class ConflictNetTrainer:
             precomputed_audio_embed = None
             precomputed_speaker_embed = None
             
-            with torch.no_grad():
+            with torch.no_grad(), torch.autocast(device_type=self._autocast_device_type, enabled=self.use_amp):
                 if hasattr(_model_inner, "audio_encoder") and getattr(_model_inner.audio_encoder, "_backend", None) == "funasr":
                     precomputed_audio_embed = _model_inner.audio_encoder(batch["audio"])
                 if getattr(_model_inner, "speaker_norm", None) is not None:
@@ -458,7 +458,7 @@ class ConflictNetTrainer:
                 # Inference bypass for evaluate as well
                 precomputed_audio_embed = None
                 precomputed_speaker_embed = None
-                with torch.no_grad():
+                with torch.no_grad(), torch.autocast(device_type=self._autocast_device_type, enabled=self.use_amp):
                     if hasattr(_model_inner, "audio_encoder") and getattr(_model_inner.audio_encoder, "_backend", None) == "funasr":
                         precomputed_audio_embed = _model_inner.audio_encoder(batch["audio"])
                     if getattr(_model_inner, "speaker_norm", None) is not None:
