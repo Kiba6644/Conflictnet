@@ -177,7 +177,6 @@ def main():
         # before the old, model-only barrier below is reached.  Build every
         # pretrained component once on rank zero before *any* dataset or model
         # constructor runs in another worker.
-        backends_list = [{"audio": "auto", "text": "auto", "lora": "auto"}]
         if local_rank == 0:
             logger.info("[DDP] Rank 0 pre-warming pretrained model and tokenizer caches...")
             rng_state = torch.get_rng_state()
@@ -190,11 +189,9 @@ def main():
             # while every other rank builds only once from the warmed cache.
             prewarmed_model = _build_model()
             
-            backends_list[0] = {
-                "audio": getattr(prewarmed_model.audio_encoder, "_backend", "auto"),
-                "text": getattr(prewarmed_model.text_encoder, "_backend", "auto"),
-                "lora": getattr(prewarmed_model.text_encoder, "_lora_backend", "auto"),
-            }
+            audio_b = getattr(prewarmed_model.audio_encoder, "_backend", "auto")
+            text_b = getattr(prewarmed_model.text_encoder, "_backend", "auto")
+            lora_b = getattr(prewarmed_model.text_encoder, "_lora_backend", "auto")
             
             # Pre-warm tokenizer (used by all datasets)
             from transformers import AutoTokenizer
@@ -210,11 +207,33 @@ def main():
             torch.set_rng_state(rng_state)
             logger.info("[DDP] Pre-warm complete — releasing the remaining ranks.")
             
-        torch.distributed.broadcast_object_list(backends_list, src=0)
-        os.environ["CONFLICTNET_WAVLM_BACKEND"] = backends_list[0]["audio"]
-        os.environ["CONFLICTNET_EMOTION2VEC_BACKEND"] = backends_list[0]["audio"]
-        os.environ["CONFLICTNET_TEXT_BACKEND"] = backends_list[0]["text"]
-        os.environ["CONFLICTNET_LORA_BACKEND"] = backends_list[0]["lora"]
+        torch.distributed.barrier()
+        
+        # Broadcast backend decisions using a simple tensor to avoid NCCL object serialization bugs
+        backend_state = torch.zeros(3, dtype=torch.long, device=args.device)
+        AUDIO_MAP = {"auto": 0, "spectrogram": 1, "pretrained": 2, "funasr": 3, "fallback_wavlm": 4}
+        TEXT_MAP = {"auto": 0, "fallback": 1, "pretrained": 2}
+        LORA_MAP = {"auto": 0, "frozen": 1, "peft": 2}
+        
+        if local_rank == 0:
+            backend_state[0] = AUDIO_MAP.get(audio_b, 0)
+            backend_state[1] = TEXT_MAP.get(text_b, 0)
+            backend_state[2] = LORA_MAP.get(lora_b, 0)
+            
+        torch.distributed.broadcast(backend_state, src=0)
+        
+        AUDIO_INV = {v: k for k, v in AUDIO_MAP.items()}
+        TEXT_INV = {v: k for k, v in TEXT_MAP.items()}
+        LORA_INV = {v: k for k, v in LORA_MAP.items()}
+        
+        audio_final = AUDIO_INV.get(backend_state[0].item(), "auto")
+        text_final = TEXT_INV.get(backend_state[1].item(), "auto")
+        lora_final = LORA_INV.get(backend_state[2].item(), "auto")
+        
+        os.environ["CONFLICTNET_WAVLM_BACKEND"] = audio_final
+        os.environ["CONFLICTNET_EMOTION2VEC_BACKEND"] = audio_final
+        os.environ["CONFLICTNET_TEXT_BACKEND"] = text_final
+        os.environ["CONFLICTNET_LORA_BACKEND"] = lora_final
 
         torch.distributed.barrier()
 
