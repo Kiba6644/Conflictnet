@@ -109,12 +109,17 @@ class SwapPretrainingObjective(nn.Module):
         swap_mask = torch.rand(B, device=device) < self.swap_prob
         swap_labels = swap_mask.float()
 
+        if B < 2:
+            swap_mask.fill_(False)
+            swap_labels.fill_(0.0)
+
         if not swap_mask.any():
             pair_feat = torch.cat([audio_embeds, text_embeds], dim=-1)
             logits = self.swap_classifier(pair_feat).squeeze(-1)
             return F.binary_cross_entropy_with_logits(logits, swap_labels)
 
-        perm = torch.randperm(B, device=device)
+        # Shift by 1 to ensure a derangement (no self-swapping)
+        perm = (torch.arange(B, device=device) + 1) % B
 
         # Randomly choose audio-swap (left) or text-swap (right) for each item
         use_audio_swap = torch.rand(B, device=device) < 0.5
