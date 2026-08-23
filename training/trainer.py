@@ -585,6 +585,12 @@ class ConflictNetTrainer:
                     f"Val F1: {val_f1:.4f}{tag}"
                 )
 
+            # Synchronize all ranks after checkpoint saving to prevent rank 1
+            # from rushing ahead into the next epoch's forward pass while rank 0
+            # is still performing disk I/O for (New Best) checkpoints.
+            if torch.distributed.is_initialized():
+                torch.distributed.barrier()
+
             # Early stopping check (only during finetune phase)
             if not is_pretrain:
                 if torch.distributed.is_initialized():
