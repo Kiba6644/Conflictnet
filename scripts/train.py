@@ -141,6 +141,12 @@ def main():
     local_rank = int(os.environ.get("LOCAL_RANK", -1))
     
     if local_rank != -1:
+        # Fix for Kaggle dual-T4 NCCL deadlocks
+        # Kaggle's T4 GPUs do not support P2P over PCIe properly. This causes
+        # any DDP collective operations (like barrier or broadcast) to hang forever.
+        os.environ["NCCL_P2P_DISABLE"] = "1"
+        os.environ["NCCL_IB_DISABLE"] = "1"
+        
         torch.cuda.set_device(local_rank)
         torch.distributed.init_process_group(backend="nccl")
         args.device = f"cuda:{local_rank}"
@@ -207,7 +213,11 @@ def main():
             torch.set_rng_state(rng_state)
             logger.info("[DDP] Pre-warm complete — releasing the remaining ranks.")
             
+        if local_rank == 0:
+            logger.info("[DDP] Rank 0 waiting at first barrier...")
         torch.distributed.barrier()
+        if local_rank == 0:
+            logger.info("[DDP] First barrier passed. Broadcasting tensor...")
         
         # Broadcast backend decisions using a simple tensor to avoid NCCL object serialization bugs
         backend_state = torch.zeros(3, dtype=torch.long, device=args.device)
@@ -222,6 +232,9 @@ def main():
             
         torch.distributed.broadcast(backend_state, src=0)
         
+        if local_rank == 0:
+            logger.info("[DDP] Broadcast complete. Setting environment variables...")
+            
         AUDIO_INV = {v: k for k, v in AUDIO_MAP.items()}
         TEXT_INV = {v: k for k, v in TEXT_MAP.items()}
         LORA_INV = {v: k for k, v in LORA_MAP.items()}
@@ -235,7 +248,11 @@ def main():
         os.environ["CONFLICTNET_TEXT_BACKEND"] = text_final
         os.environ["CONFLICTNET_LORA_BACKEND"] = lora_final
 
+        if local_rank == 0:
+            logger.info("[DDP] Variables set. Waiting at second barrier...")
         torch.distributed.barrier()
+        if local_rank == 0:
+            logger.info("[DDP] Second barrier passed. Starting dataset building...")
 
     # --- Build datasets ---
     from data.datasets import (
