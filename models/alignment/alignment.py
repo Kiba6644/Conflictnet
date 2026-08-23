@@ -119,7 +119,6 @@ class CrossModalAttention(nn.Module):
             if context_padding is not None:
                 valid = torch.zeros(B, 1, dtype=torch.bool, device=device)
                 kv_padding_audio = torch.cat([valid, context_padding], dim=1)
-                kv_padding_text = kv_padding_audio.clone()
                 # Guard against all-masked context: insert a neutral unmasked key
                 fully_masked = context_padding.all(dim=1)  # (B,)
                 if fully_masked.any():
@@ -128,7 +127,12 @@ class CrossModalAttention(nn.Module):
                     audio_kv = torch.cat([audio_kv, neutral], dim=1)
                     pad_ext = torch.zeros(B, 1, dtype=torch.bool, device=device)
                     kv_padding_audio = torch.cat([kv_padding_audio, pad_ext], dim=1)
-                    kv_padding_text = torch.cat([kv_padding_text, pad_ext], dim=1)
+                # BUG FIX: clone AFTER all extensions so both masks match the
+                # final K/V length. Previously cloned before the neutral-key
+                # extension, making kv_padding_text 1 slot shorter than text_kv
+                # on the first turn of every dialogue (cold-start), which caused
+                # a shape mismatch crash inside nn.MultiheadAttention.
+                kv_padding_text = kv_padding_audio.clone()
 
         # Audio path: audio attends to text (+ optional context)
         q_audio = audio_embed.unsqueeze(1)  # (B, 1, D)
@@ -229,17 +233,17 @@ class ContextGatedContrastiveLoss(nn.Module):
             sim_t2a = sim_raw.T / tau
 
         # Standard symmetric InfoNCE
+        # BUG FIX: removed the sarcasm_mask.all() early-exit that zeroed both
+        # InfoNCE losses when an entire batch was conflict (common on MUStARD).
+        # F.cross_entropy with ignore_index=-1 handles a fully-masked batch
+        # gracefully without needing a special-case zero branch.
         B = audio_embeds.size(0)
         labels = torch.arange(B, device=audio_embeds.device)
-        if sarcasm_mask is not None and sarcasm_mask.all():
-            loss_a2t = (sim_a2t * 0.0).sum()
-            loss_t2a = (sim_t2a * 0.0).sum()
-        else:
-            if sarcasm_mask is not None and sarcasm_mask.any():
-                labels = labels.clone()
-                labels[sarcasm_mask] = -1   # cross_entropy ignore_index=-1
-            loss_a2t = F.cross_entropy(sim_a2t, labels, ignore_index=-1)
-            loss_t2a = F.cross_entropy(sim_t2a, labels, ignore_index=-1)
+        if sarcasm_mask is not None and sarcasm_mask.any():
+            labels = labels.clone()
+            labels[sarcasm_mask] = -1   # cross_entropy ignore_index=-1
+        loss_a2t = F.cross_entropy(sim_a2t, labels, ignore_index=-1)
+        loss_t2a = F.cross_entropy(sim_t2a, labels, ignore_index=-1)
         contrastive_loss = (loss_a2t + loss_t2a) / 2
 
         # Conflict separation loss: push paired audio↔text apart by margin

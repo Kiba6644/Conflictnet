@@ -42,7 +42,9 @@ class _SpectrogramEncoder(nn.Module):
         )
 
     def forward(self, audio, attention_mask=None, return_frames=False):
-        spec = torch.stft(audio, n_fft=512, hop_length=160, window=self.hann,
+        # BUG FIX: torch.stft does not support bfloat16 (raised under AMP).
+        # Cast both audio and the Hann window to float32 explicitly.
+        spec = torch.stft(audio.float(), n_fft=512, hop_length=160, window=self.hann.float(),
                           return_complex=True).abs()
         conv_out = self.conv(spec)
         pooled = conv_out.mean(dim=-1)
@@ -193,9 +195,13 @@ class WavLMWeightedEncoder(nn.Module):
             logger.info(f"[WavLMWeighted] Using local path: {local_path}")
         self._encoder = None
         self.output_dim = 1024  # WavLM-large hidden size
-        self._n_layers = 25    # 1 embedding + 24 transformer layers
-        # Learnable scalar per hidden state — initialized to uniform
-        self.layer_weights = nn.Parameter(torch.zeros(self._n_layers))
+        # BUG FIX: _n_layers used to be set to 25 AND then nn.Parameter was
+        # created, then inside the try block it was set again from enc.config
+        # and another nn.Parameter was created. That double-init is fragile
+        # (different state_dict shape if the try block fails mid-way).
+        # Instead, set _n_layers once here as a default, update it if WavLM
+        # loads, then create layer_weights exactly once after the try/except.
+        self._n_layers = 25    # WavLM-large default: 1 embedding + 24 layers
 
         try:
             from transformers import WavLMModel
@@ -212,8 +218,6 @@ class WavLMWeightedEncoder(nn.Module):
             self._encoder = enc
             self.output_dim = enc.config.hidden_size
             self._n_layers = enc.config.num_hidden_layers + 1  # +1 for embedding layer
-            # Re-init weights to match actual layer count
-            self.layer_weights = nn.Parameter(torch.zeros(self._n_layers))
             logger.info(
                 f"[WavLMWeighted] Loaded {model_name} (dim={self.output_dim}, "
                 f"n_layers={self._n_layers}, layer_weights=trainable)"
@@ -221,6 +225,9 @@ class WavLMWeightedEncoder(nn.Module):
         except Exception as e:
             logger.warning(f"[WavLMWeighted] WavLM unavailable ({e}), using spectrogram fallback")
             self._encoder = _SpectrogramEncoder(output_dim=self.output_dim)
+
+        # Learnable scalar per hidden state — created once with the final layer count
+        self.layer_weights = nn.Parameter(torch.zeros(self._n_layers))
 
     def _masked_pool(self, hs: torch.Tensor, attention_mask=None) -> torch.Tensor:
         """Masked mean pooling over time dimension."""

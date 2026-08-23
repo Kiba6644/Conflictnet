@@ -187,7 +187,10 @@ class WordLevelDivergence(nn.Module):
 
         max_div = divergences.max()
         mean_div = divergences.mean()
-        std_div = divergences.std() if n > 1 else torch.zeros(1, device=divergences.device)
+        # BUG FIX: torch.zeros(1) gives shape (1,) while divergences.std() gives
+        # shape (), so squeeze() was needed as a workaround. Use new_zeros(()) to
+        # produce a scalar directly, matching the n>1 path and avoiding the squeeze.
+        std_div = divergences.std() if n > 1 else divergences.new_zeros(())
         n_conflict = (divergences > self.divergence_threshold).float().mean()
 
         # Top-3 divergent word positions (normalised by sequence length)

@@ -168,14 +168,18 @@ class MultiTaskLoss(nn.Module):
         self.log_vars = nn.Parameter(init)
 
     def forward(self, losses: List[torch.Tensor]) -> Tuple[torch.Tensor, Dict[str, float]]:
-        total = torch.tensor(0.0, device=self.log_vars.device)
+        # Use log_vars.device as canonical; move each loss to it to avoid
+        # device mismatches (fallback tensors may be created on audio.device).
+        total = self.log_vars.new_zeros(())  # scalar, same device as parameters
         weights = {}
         for i, loss in enumerate(losses):
-            if loss.item() == 0.0:
-                weights[f"sigma_task_{i}"] = torch.exp(self.log_vars[i] * 0.5).item()
-                continue
             precision = torch.exp(-self.log_vars[i])
-            total = total + precision * loss + 0.5 * self.log_vars[i]
+            # Always accumulate the log(sigma) regularisation term so log_vars[i]
+            # always receives a gradient. Previously a loss.item()==0.0 early-exit
+            # was skipping this for disabled tasks (e.g. severity), leaving
+            # log_vars[2] frozen at its init value of 5.0 throughout training.
+            loss_i = loss.to(self.log_vars.device)
+            total = total + precision * loss_i + 0.5 * self.log_vars[i]
             weights[f"sigma_task_{i}"] = torch.exp(self.log_vars[i] * 0.5).item()
         return total, weights
 
@@ -331,6 +335,7 @@ class ConflictNet(nn.Module):
         prosody_z: Optional[torch.Tensor] = None,
         return_frames: bool = False,
         return_tokens: bool = False,
+        precomputed_audio_embed: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Encode audio and text to shared space, apply speaker normalization.
 
@@ -341,6 +346,9 @@ class ConflictNet(nn.Module):
             prosody_z: Pre-computed prosody z-scores (B, 3).
             return_frames: If True, also return audio frame-level embeddings.
             return_tokens: If True, also return text token-level embeddings.
+            precomputed_audio_embed: (B, audio_enc_dim) — pre-extracted audio
+                embedding to bypass the audio encoder (used when FunASR is
+                pre-extracted outside DDP scope to prevent NCCL timeout).
 
         Returns:
             audio_embed: (B, embed_dim)
@@ -349,12 +357,18 @@ class ConflictNet(nn.Module):
             audio_frames: (B, T_audio, D) or None
             text_tokens:  (B, L_text, D) or None
         """
-        # Audio path — pass attention_mask to avoid padding contamination
-        audio_raw = self.audio_encoder(audio, attention_mask=audio_attention_mask, return_frames=return_frames)
-        if return_frames:
-            audio_raw, audio_frames = audio_raw
-        else:
+        # Audio path
+        if precomputed_audio_embed is not None:
+            # Use pre-extracted embedding; frame-level features are unavailable
+            # in this path (FunASR does not return frame-level hidden states).
+            audio_raw = precomputed_audio_embed
             audio_frames = None
+        else:
+            audio_raw = self.audio_encoder(audio, attention_mask=audio_attention_mask, return_frames=return_frames)
+            if return_frames:
+                audio_raw, audio_frames = audio_raw
+            else:
+                audio_frames = None
         audio_embed = self.audio_proj(audio_raw)        # (B, embed_dim)
 
         # Project frame-level embeddings to embed_dim for word divergence
@@ -415,7 +429,7 @@ class ConflictNet(nn.Module):
         # Speaker normalization — pass pre-computed tensor from collate_fn
         prosody_z: Optional[torch.Tensor] = None,         # (B, 3) on device
         # Word-level divergence inputs (optional, requires MFA alignment)
-        word_timestamps: Optional[List[List[Tuple[float, float]]]] = None,   # list of (n_words, 2) per sample
+        word_timestamps: Optional[List[List[Tuple[float, float]]]] = None,
         token_word_boundaries: Optional[List[List[Tuple[int, int]]]] = None,
         # Supervision
         conflict_type_labels: Optional[torch.Tensor] = None,  # (B, n_types) multi-hot
@@ -423,6 +437,11 @@ class ConflictNet(nn.Module):
         conflict_binary_labels: Optional[torch.Tensor] = None, # (B,) for contrastive
         pretraining: bool = False,
         dataset_names: Optional[List[str]] = None,
+        # Pre-extracted audio embedding (bypasses audio encoder inside DDP scope)
+        # Set by trainer when audio_encoder._backend == "funasr" to prevent NCCL
+        # timeout: FunASR's sequential per-sample inference holds the thread long
+        # enough that the faster rank's gradient all-reduce times out.
+        precomputed_audio_embed: Optional[torch.Tensor] = None,
     ) -> ConflictNetOutput:
 
         # 1. Encode (all pure-torch — numpy preprocessing done in collate_fn)
@@ -433,6 +452,7 @@ class ConflictNet(nn.Module):
             prosody_z=prosody_z,
             return_frames=need_frames,
             return_tokens=need_frames,
+            precomputed_audio_embed=precomputed_audio_embed,
         )
 
         # 2. Cross-modal attention: audio↔text BEFORE fusion (+ optional dialogue context)

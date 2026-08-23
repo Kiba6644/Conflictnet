@@ -61,10 +61,14 @@ class SpeakerAdaptiveThreshold(nn.Module):
             speaker_feat: (B, embed_dim) speaker representation.
 
         Returns:
-            (B,) per-sample threshold offsets.
+            (B,) per-sample threshold offsets in [0, max_offset].
         """
-        offset = torch.tanh(self.net(speaker_feat)).squeeze(-1)  # (B,) in [-1, 1]
-        return offset * (self.max_offset / 2)
+        # BUG FIX: tanh → [-1, 1], rescale to [0, max_offset] so the threshold
+        # is always >= the base type_threshold (no false-positive increase from
+        # expressive speakers). Previously returned a signed value which could
+        # push the threshold *below* 0.5.
+        raw = torch.tanh(self.net(speaker_feat)).squeeze(-1)  # (B,) in [-1, 1]
+        return (raw + 1.0) / 2.0 * self.max_offset
 
 
 class ConflictClassifier(nn.Module):

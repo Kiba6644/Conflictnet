@@ -196,7 +196,8 @@ class ConflictNetTrainer:
 
     def _setup_wandb(self):
         self.use_wandb = False
-        if torch.distributed.is_initialized() and torch.distributed.get_rank() != 0:
+        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+        if local_rank != 0:
             return
         try:
             import wandb  # type: ignore
@@ -271,6 +272,13 @@ class ConflictNetTrainer:
             else:
                 ctx_embeds = None
                 ctx_padding = None
+            # Extract FunASR embeddings outside DDP scope to prevent NCCL timeout
+            # (Fixes Bug 10 / the DDP broadcast timeout reported by user)
+            _model_inner = getattr(self.model, "module", self.model)
+            precomputed_audio_embed = None
+            if hasattr(_model_inner, "audio_encoder") and getattr(_model_inner.audio_encoder, "_backend", None) == "funasr":
+                with torch.no_grad():
+                    precomputed_audio_embed = _model_inner.audio_encoder(batch["audio"])
 
             with torch.autocast(device_type=self._autocast_device_type, enabled=self.use_amp):
                 output = self.model(
@@ -278,6 +286,7 @@ class ConflictNetTrainer:
                     input_ids=batch["input_ids"],
                     attention_mask=batch["attention_mask"],
                     audio_attention_mask=batch.get("audio_attention_mask"),
+                    precomputed_audio_embed=precomputed_audio_embed,
                     context_embeds=ctx_embeds,
                     context_padding=ctx_padding,
                     speaker_roles=batch.get("speaker_roles"),
@@ -388,108 +397,130 @@ class ConflictNetTrainer:
         all_binary = []
 
         try:
-            from tqdm.auto import tqdm
-            loader_iter = tqdm(
-                self.val_loader, 
-                desc="Eval", 
-                disable=torch.distributed.is_initialized() and int(os.environ.get("LOCAL_RANK", -1)) != 0,
-                file=sys.stdout,
-                miniters=5
-            )
-        except ImportError:
-            loader_iter = self.val_loader
-
-        for batch in loader_iter:
-            batch = {
-                k: v.to(self.device, non_blocking=True) if isinstance(v, torch.Tensor) else v
-                for k, v in batch.items()
-            }
-            conv_ids = batch.get("conversation_ids", [])
-            turn_indices = batch.get("turn_indices", None)
-            if isinstance(turn_indices, torch.Tensor):
-                turn_indices = turn_indices.cpu().tolist()
-            str_conv_ids = [str(x) for x in conv_ids] if conv_ids else []
-            # Use .module to get the true embed_dim when wrapped by DDP/DataParallel.
-            # Calling getattr on the wrapper returns the default (256) instead of
-            # the actual value, causing a shape mismatch crash.
-            _model_inner = getattr(self.model, "module", self.model)
-            _embed_dim = getattr(_model_inner, "embed_dim", 256)
-            ctx_embeds, ctx_padding, _ = self.ctx_cache.get_batch_context(
-                str_conv_ids,
-                embed_dim=_embed_dim,
-                turn_indices=turn_indices,
-            ) if str_conv_ids else (None, None, [])
-            with torch.autocast(device_type=self._autocast_device_type, enabled=self.use_amp):
-                output = self.model(
-                audio=batch["audio"],
-                input_ids=batch["input_ids"],
-                attention_mask=batch["attention_mask"],
-                audio_attention_mask=batch.get("audio_attention_mask"),
-                prosody_z=batch.get("prosody_z"),
-                context_embeds=ctx_embeds,
-                context_padding=ctx_padding,
-                speaker_roles=batch.get("speaker_roles"),
-                word_timestamps=batch.get("word_timestamps"),
-                token_word_boundaries=batch.get("token_word_boundaries"),
-            )
-            if str_conv_ids and output.fused_embed is not None:
-                self.ctx_cache.batch_update(
-                    str_conv_ids, output.fused_embed, turn_indices=turn_indices
+            try:
+                from tqdm.auto import tqdm
+                loader_iter = tqdm(
+                    self.val_loader,
+                    desc="Eval",
+                    disable=torch.distributed.is_initialized() and int(os.environ.get("LOCAL_RANK", -1)) != 0,
+                    file=sys.stdout,
+                    miniters=5
                 )
-            all_probs.append(output.probs_type.float().cpu().numpy())
-            all_labels.append(batch["conflict_type_labels"].cpu().numpy())
-            all_binary.append(batch["conflict_binary"].cpu().numpy())
+            except ImportError:
+                loader_iter = self.val_loader
 
-        probs = np.concatenate(all_probs)    # (N, n_classes)
-        labels = np.concatenate(all_labels)  # (N, n_classes)
-        binary = np.concatenate(all_binary)  # (N,)
+            for batch in loader_iter:
+                batch = {
+                    k: v.to(self.device, non_blocking=True) if isinstance(v, torch.Tensor) else v
+                    for k, v in batch.items()
+                }
+                conv_ids = batch.get("conversation_ids", [])
+                turn_indices = batch.get("turn_indices", None)
+                if isinstance(turn_indices, torch.Tensor):
+                    turn_indices = turn_indices.cpu().tolist()
+                str_conv_ids = [str(x) for x in conv_ids] if conv_ids else []
+                # Use .module to get the true embed_dim when wrapped by DDP/DataParallel.
+                # Calling getattr on the wrapper returns the default (256) instead of
+                # the actual value, causing a shape mismatch crash.
+                _model_inner = getattr(self.model, "module", self.model)
+                _embed_dim = getattr(_model_inner, "embed_dim", 256)
+                ctx_embeds, ctx_padding, _ = self.ctx_cache.get_batch_context(
+                    str_conv_ids,
+                    embed_dim=_embed_dim,
+                    turn_indices=turn_indices,
+                ) if str_conv_ids else (None, None, [])
+                # FunASR bypass for evaluate as well
+                precomputed_audio_embed = None
+                if hasattr(_model_inner, "audio_encoder") and getattr(_model_inner.audio_encoder, "_backend", None) == "funasr":
+                    precomputed_audio_embed = _model_inner.audio_encoder(batch["audio"])
 
-        # --- Binary conflict F1 / AUC (dataset-agnostic) ---
-        # Max probability across conflict emotion slots (anger, disgust, fear = indices 0,1,2)
-        conflict_prob = probs[:, :3].max(axis=1)
-        bin_pred = (conflict_prob > 0.5).astype(int)
-        binary_int = binary.astype(int)
-        f1_binary = f1_score(binary_int, bin_pred, zero_division=0)
-        try:
-            auc_binary = roc_auc_score(binary_int, conflict_prob)
-        except ValueError:
-            auc_binary = 0.5  # degenerate split with only one class present
+                with torch.autocast(device_type=self._autocast_device_type, enabled=self.use_amp):
+                    output = self.model(
+                    audio=batch["audio"],
+                    input_ids=batch["input_ids"],
+                    attention_mask=batch["attention_mask"],
+                    audio_attention_mask=batch.get("audio_attention_mask"),
+                    precomputed_audio_embed=precomputed_audio_embed,
+                    prosody_z=batch.get("prosody_z"),
+                    context_embeds=ctx_embeds,
+                    context_padding=ctx_padding,
+                    speaker_roles=batch.get("speaker_roles"),
+                    word_timestamps=batch.get("word_timestamps"),
+                    token_word_boundaries=batch.get("token_word_boundaries"),
+                )
+                if str_conv_ids and output.fused_embed is not None:
+                    self.ctx_cache.batch_update(
+                        str_conv_ids, output.fused_embed, turn_indices=turn_indices
+                    )
+                all_probs.append(output.probs_type.float().cpu().numpy())
+                all_labels.append(batch["conflict_type_labels"].cpu().numpy())
+                all_binary.append(batch["conflict_binary"].cpu().numpy())
 
-        # --- Per-class AP, averaged over classes that have at least one positive ---
-        per_class_ap = []
-        for c in range(labels.shape[1]):
-            if labels[:, c].sum() > 0:
-                try:
-                    per_class_ap.append(average_precision_score(labels[:, c], probs[:, c]))
-                except ValueError:
-                    pass
-        macro_ap = float(np.mean(per_class_ap)) if per_class_ap else 0.0
+            probs = np.concatenate(all_probs)    # (N, n_classes)
+            labels = np.concatenate(all_labels)  # (N, n_classes)
+            binary = np.concatenate(all_binary)  # (N,)
 
-        # Weighted (macro) F1 over all classes — used for best-checkpoint
-        # and early-stopping.  Using binary_f1 here was incorrect: it
-        # collapsed the multi-class signal to a single conflict/non-conflict
-        # decision and ignored per-emotion class performance.
-        from sklearn.metrics import f1_score as _f1
-        f1_macro = _f1(labels, (probs >= 0.5).astype(int), average="macro", zero_division=0)
+            # --- Binary conflict F1 / AUC (dataset-agnostic) ---
+            # Max probability across conflict emotion slots (anger, disgust, fear = indices 0,1,2)
+            conflict_prob = probs[:, :3].max(axis=1)
+            bin_pred = (conflict_prob > 0.5).astype(int)
+            binary_int = binary.astype(int)
+            f1_binary = f1_score(binary_int, bin_pred, zero_division=0)
+            try:
+                auc_binary = roc_auc_score(binary_int, conflict_prob)
+            except ValueError:
+                auc_binary = 0.5  # degenerate split with only one class present
 
-        metrics = {
-            "val/f1_binary": float(f1_binary),
-            "val/auc_binary": float(auc_binary),
-            "val/macro_ap": float(macro_ap),
-            "val/f1_macro": float(f1_macro),
-            # val/f1_weighted drives best-checkpoint and early-stopping logic.
-            # BUG FIX: was incorrectly set to f1_binary (binary conflict F1)
-            # which ignores per-emotion class accuracy. Now uses macro F1.
-            "val/f1_weighted": float(f1_macro),
-        }
-        is_ddp = torch.distributed.is_initialized() and int(os.environ.get("LOCAL_RANK", -1)) != -1
-        if is_ddp:
-            metric_keys = sorted(list(metrics.keys()))
-            metric_values = torch.tensor([metrics[key] for key in metric_keys], device=self.device)
-            torch.distributed.broadcast(metric_values, src=0)
-            if int(os.environ.get("LOCAL_RANK", -1)) != 0:
-                metrics = {k: v.item() for k, v in zip(metric_keys, metric_values)}
-        return metrics
+            # --- Per-class AP, averaged over classes that have at least one positive ---
+            per_class_ap = []
+            for c in range(labels.shape[1]):
+                if labels[:, c].sum() > 0:
+                    try:
+                        per_class_ap.append(average_precision_score(labels[:, c], probs[:, c]))
+                    except ValueError:
+                        pass
+            macro_ap = float(np.mean(per_class_ap)) if per_class_ap else 0.0
+
+            # Weighted (macro) F1 over all classes — used for best-checkpoint
+            # and early-stopping.  Using binary_f1 here was incorrect: it
+            # collapsed the multi-class signal to a single conflict/non-conflict
+            # decision and ignored per-emotion class performance.
+            from sklearn.metrics import f1_score as _f1
+            f1_macro = _f1(labels, (probs >= 0.5).astype(int), average="macro", zero_division=0)
+
+            metrics = {
+                "val/f1_binary": float(f1_binary),
+                "val/auc_binary": float(auc_binary),
+                "val/macro_ap": float(macro_ap),
+                "val/f1_macro": float(f1_macro),
+                # val/f1_weighted drives best-checkpoint and early-stopping logic.
+                # BUG FIX: was incorrectly set to f1_binary (binary conflict F1)
+                # which ignores per-emotion class accuracy. Now uses macro F1.
+                "val/f1_weighted": float(f1_macro),
+            }
+            is_ddp = torch.distributed.is_initialized() and int(os.environ.get("LOCAL_RANK", -1)) != -1
+            if is_ddp:
+                metric_keys = sorted(list(metrics.keys()))
+                metric_values = torch.tensor([metrics[key] for key in metric_keys], device=self.device)
+                torch.distributed.broadcast(metric_values, src=0)
+                if int(os.environ.get("LOCAL_RANK", -1)) != 0:
+                    metrics = {k: v.item() for k, v in zip(metric_keys, metric_values)}
+            return metrics
+
+        except Exception:
+            # BUG FIX: broadcast a -1 sentinel to unblock non-zero DDP ranks that
+            # are blocked on torch.distributed.broadcast() before re-raising.
+            # Without this, a rank-0 OOM / exception causes a permanent deadlock.
+            if is_ddp:
+                sentinel = torch.full((len(metric_keys),), -1.0, device=self.device)
+                torch.distributed.broadcast(sentinel, src=0)
+            raise
+        finally:
+            # BUG FIX: always restore training mode. evaluate() called model.eval()
+            # but never restored model.train(), leaving the model in eval mode if
+            # evaluate() is called outside the train() loop (e.g. from a script).
+            self.model.train()
+
 
     def train(
         self,

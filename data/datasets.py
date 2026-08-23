@@ -1244,6 +1244,10 @@ class GoEmotionsDataset(Dataset):
             "gender": None,
             "text": item["text"],
             "utterance_id": f"goemotions_{idx}",
+            # Each GoEmotions sample is treated as its own single-turn conversation
+            # so the context cache never accumulates cross-sample history.
+            "conversation_id": f"goemotions_{idx}",
+            "turn_index": 0,
         }
 
 

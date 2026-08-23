@@ -63,7 +63,11 @@ class CurriculumSampler(Sampler):
         if len(indices) == 0:
             indices = np.arange(len(self.difficulties))
         if self.shuffle:
-            np.random.shuffle(indices)
+            # BUG FIX: was using the global numpy random state, making shuffle
+            # non-reproducible and non-deterministic across DDP ranks / resumed
+            # checkpoints. Use an epoch-seeded generator instead.
+            rng = np.random.default_rng(seed=self.epoch)
+            rng.shuffle(indices)
         return iter(indices.tolist())
 
     def __len__(self) -> int:
