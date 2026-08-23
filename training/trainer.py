@@ -234,7 +234,9 @@ class ConflictNetTrainer:
                 self.train_loader, 
                 desc=f"Train Epoch {epoch+1}", 
                 disable=torch.distributed.is_initialized() and int(os.environ.get("LOCAL_RANK", -1)) != 0,
-                file=sys.stdout
+                file=sys.stdout,
+                miniters=10,
+                mininterval=5.0
             )
         except ImportError:
             loader_iter = self.train_loader
@@ -360,7 +362,9 @@ class ConflictNetTrainer:
                 self.val_loader, 
                 desc="Eval", 
                 disable=torch.distributed.is_initialized() and int(os.environ.get("LOCAL_RANK", -1)) != 0,
-                file=sys.stdout
+                file=sys.stdout,
+                miniters=10,
+                mininterval=5.0
             )
         except ImportError:
             loader_iter = self.val_loader
