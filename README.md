@@ -1,170 +1,161 @@
 # ConflictNet v2
 
-**Speaker-normalised cross-modal emotion conflict detection** with temporal context, interpretability, and multi-label subtype classification.
+**Speaker-normalized cross-modal emotion conflict detection** with multi-turn dialogue context, multi-dataset integration, robust DDP multi-GPU scaling, and interpretability.
 
-> Built on top of HuBERT-CLAP. ~70% reused from existing libraries; ~1,400 lines of novel code.
-
----
-
-## Architecture
-
-```
-Audio (wav) ──► Emotion2Vec / WavLM / wav2vec2 ──► ProjectionHead ──┐
-                                                                      ├──► FusionGate ──► TransformerTemporalContext ──► ConflictClassifier
-Text (str) ───► DeBERTa-v3 + LoRA ──────────────► ProjectionHead ──┤                                                     ├── logits_type (sarcasm/suppression/deception)
-                                                                      │                                                     ├── severity [0,1]
-ECAPA-TDNN ──► SpeakerNormalizer (z-score) ─────────────────────────┘                                                     └── conflict_flag (bool)
-                                                       │
-              MFA TextGrids ──► WordLevelDivergence ───┘ (optional)
-```
-
-**Losses (jointly optimised via Kendall 2018 uncertainty weighting):**
-1. Context-Gated InfoNCE contrastive loss (audio ↔ text alignment)
-2. Multi-label BCE for conflict subtypes
-3. Severity MSE regression
-4. Self-supervised swap detection (pre-training phase)
+> Built on top of HuBERT-CLAP architecture. Features multi-dataset unified training across IEMOCAP, MUStARD++, CREMA-D, and MELD.
 
 ---
 
-## Quick Start
+## 🌟 Key Updates & Improvements
+
+Compared to earlier versions, ConflictNet v2 includes major architectural and pipeline upgrades:
+
+* 📚 **Multi-Dataset Unified Pipeline:** Full support for loading and joint training across **IEMOCAP**, **MUStARD++**, **CREMA-D**, and **MELD** datasets simultaneously.
+* ⚡ **Robust DDP Multi-GPU Execution:**
+  * **Zero NCCL Deadlocks:** Clean separation of inference evaluation (`_model_for_eval`) to prevent rank desynchronization and collective timeouts.
+  * **Rank-Zero Cache Warming:** Automatic single-rank downloading of HuggingFace and SpeechBrain models before multi-process initialization.
+  * **Exact Gradient Accumulation Sync:** Guarantees synchronization on epoch boundaries even when batch counts are indivisible by accumulation steps.
+* 🎙️ **Flexible Audio Backends:** Dynamic support for **Emotion2Vec**, **WavLM**, **FunASR**, and **wav2vec2** audio encoders with fallback mechanisms.
+* 🗣️ **Speaker Normalization:** ECAPA-TDNN speaker embeddings combined with prosody z-score normalization.
+* 🧠 **Dialogue Temporal Context Transformer:** Causal Transformer modeling past conversational turns with an isolated turn context cache (`ContextCache`).
+* 🎯 **Multi-Task & Focal Loss Engine:** Multi-label Focal BCE loss targeting hard emotion cases, Context-Gated InfoNCE contrastive alignment, Severity MSE, and Kendall uncertainty loss weighting.
+* 💾 **Safe Checkpointing & Auto-Retries:** `safetensors` model serialization and automated learning rate decay retry loops targeting goal F1 scores.
+
+---
+
+## 📐 Architecture Overview
+
+```
+Audio (wav) ──────► Emotion2Vec / WavLM / wav2vec2 ──► ProjectionHead ──┐
+                                                                         ├──► FusionGate ──► TransformerTemporalContext ──► ConflictClassifier
+Text (str) ───────► DeBERTa-v3 + LoRA ────────────────► ProjectionHead ──┤                                                     ├── logits_type (sarcasm/suppression/deception)
+                                                                         │                                                     ├── severity [0,1]
+ECAPA-TDNN ───────► SpeakerNormalizer (z-score) ─────────────────────────┘                                                     └── conflict_flag (bool)
+                                                         │
+                 MFA TextGrids ──► WordLevelDivergence ───┘ (optional)
+```
+
+### Multi-Task Objectives
+1. **Focal BCE Loss:** Focuses optimization on hard minority conflict types (anger, disgust, fear).
+2. **Context-Gated InfoNCE:** Cross-modal contrastive alignment between speech and text modalities.
+3. **Severity MSE Regression:** Estimates conflict severity score.
+4. **Self-Supervised Swap Objective:** Detects audio-text modality mismatches during pre-training.
+
+---
+
+## 📊 Supported Datasets
+
+| Dataset | Modality | Primary Annotations |
+| :--- | :--- | :--- |
+| **IEMOCAP** | Audio + Text | Multi-speaker dyadic dialogue emotions |
+| **MUStARD++** | Audio + Text | Sarcasm & implicit sentiment in TV dialogue |
+| **CREMA-D** | Audio + Text | Multi-actor emotional speech expressions |
+| **MELD** | Audio + Text | Multi-party conversational emotion & sentiment |
+
+---
+
+## 🚀 Quick Start
+
+### 1. Installation
 
 ```bash
 conda create -n conflictnet python=3.10 -y
 conda activate conflictnet
 pip install -r requirements.txt
+
+# Optional: Montreal Forced Aligner for word-level alignment
 conda install -c conda-forge montreal-forced-aligner -y
 mfa model download acoustic english_mfa
 mfa model download dictionary english_us_arpa
 ```
 
-### Reproduce baseline (IEMOCAP)
+### 2. Multi-Dataset Training (Single GPU or DDP)
+
+#### Single-GPU Run:
 ```bash
 python scripts/train.py \
-    --iemocap_root /data/iemocap \
+    --iemocap_root /path/to/IEMOCAP \
+    --mustard_root /path/to/MUStARD \
+    --cremad_root /path/to/CREMA-D \
+    --meld_root /path/to/MELD \
     --audio_encoder emotion2vec \
     --epochs 30 \
     --pretrain_epochs 5 \
-    --output_dir checkpoints/emotion2vec_run1
+    --output_dir checkpoints/multi_dataset_run
 ```
 
-### Evaluate
+#### DDP Multi-GPU Run (e.g. 2 GPUs via `torchrun`):
+```bash
+torchrun --nproc_per_node=2 scripts/train.py \
+    --iemocap_root /path/to/IEMOCAP \
+    --meld_root /path/to/MELD \
+    --audio_encoder emotion2vec \
+    --epochs 30 \
+    --amp \
+    --output_dir checkpoints/ddp_run
+```
+
+### 3. Evaluation & Metrics
+
+Evaluate trained models for Weighted Accuracy (WAcc), Macro-F1, AP, AUC, and Fairness metrics:
 ```bash
 python scripts/evaluate.py \
-    --checkpoint checkpoints/emotion2vec_run1/best_model.safetensors \
-    --iemocap_root /data/iemocap \
+    --checkpoint checkpoints/multi_dataset_run/best_model.safetensors \
+    --iemocap_root /path/to/IEMOCAP \
     --fairness \
     --output_dir results/
 ```
 
-### Run tests (no GPU needed)
+### 4. Run Unit Tests (No GPU Required)
+
 ```bash
 pytest tests/ -v
 ```
 
 ---
 
-## Project Structure
+## 🛠️ Repository Structure
 
 ```
-conflictnet/
+ConflictNet-main/
 ├── configs/
-│   └── default.yaml            # Hydra config: all hyperparameters
+│   └── default.yaml            # Hydra configuration
 ├── data/
-│   ├── datasets.py             # IEMOCAP + MUStARD++ loaders + collate_fn
-│   └── synthetic.py            # StarGANv2-VC conflict pair generation
+│   ├── datasets.py             # IEMOCAP, MUStARD++, CREMA-D, MELD loaders & collate
+│   └── synthetic.py            # Synthetic pair generation
 ├── models/
 │   ├── encoders/
-│   │   ├── audio.py            # Emotion2Vec, WavLM, wav2vec2
+│   │   ├── audio.py            # Emotion2Vec, WavLM, FunASR, wav2vec2
 │   │   └── text.py             # DeBERTa-v3-large + LoRA
 │   ├── speaker_norm/
-│   │   └── speaker_norm.py     # ECAPA-TDNN + prosody z-score + cold-start
+│   │   └── speaker_norm.py     # ECAPA-TDNN + prosody z-score
 │   ├── temporal/
-│   │   └── temporal.py         # Causal Transformer over dialogue turns ⭐
+│   │   └── temporal.py         # Multi-turn dialogue Transformer context
 │   ├── alignment/
-│   │   ├── alignment.py        # ProjectionHead + ContextGatedContrastiveLoss ⭐
-│   │   └── word_divergence.py  # MFA word-level divergence features ⭐
+│   │   ├── alignment.py        # Context-Gated InfoNCE Contrastive Loss
+│   │   └── word_divergence.py  # MFA word-level divergence features
 │   ├── classifier/
-│   │   └── classifier.py       # Multi-label subtype + severity head ⭐
-│   └── conflictnet.py          # Full model assembly + MultiTaskLoss + SwapObjective
+│   │   └── classifier.py       # Subtype logits & severity heads
+│   └── conflictnet.py          # Master ConflictNet architecture & multi-task loss
 ├── training/
-│   ├── trainer.py              # Training loop + warmup cosine scheduler + WandB
-│   └── curriculum.py           # CurriculumSampler ⭐
+│   ├── trainer.py              # DDP trainer, warmup scheduler, context cache, evaluation
+│   └── curriculum.py           # Curriculum learning sampler
 ├── evaluation/
-│   ├── metrics.py              # WAcc, macro-F1, per-type AP/AUC, severity MAE
-│   ├── fairness.py             # FairLearn demographic parity + equalized odds
-│   ├── attribution.py          # Captum integrated gradients (text + audio)
-│   └── llm_baseline.py         # GPT-4o text-only ceiling
+│   ├── metrics.py              # WAcc, Macro-F1, AUC, AP evaluation
+│   ├── fairness.py             # Demographic parity & equalized odds
+│   ├── attribution.py          # Captum integrated gradients
+│   └── ood_probe.py            # Out-of-distribution evaluation
 ├── scripts/
-│   ├── train.py                # CLI: train
-│   ├── evaluate.py             # CLI: evaluate
-│   └── generate_synthetic.py  # CLI: StarGANv2-VC data generation
-├── tests/
-│   └── test_components.py      # Unit tests (all components, no GPU required)
+│   ├── train.py                # Main training CLI with auto-retry target F1
+│   ├── evaluate.py             # Evaluation CLI
+│   └── compute_prosody_stats.py# Prosody z-score computation utility
+├── FUTURE_UPGRADES.md          # Technical roadmap to 90%+ accuracy
+├── README(old).md               # Legacy README backup
 └── requirements.txt
 ```
 
-⭐ = novel contribution
-
 ---
 
-## Novel Components (~1,400 lines)
+## 📖 Roadmap & Future Upgrades
 
-| Component | File | Lines | Novelty |
-|-----------|------|-------|---------|
-| Speaker normalization + cold-start | `models/speaker_norm/speaker_norm.py` | ~230 | ⭐ Novel |
-| Transformer temporal context | `models/temporal/temporal.py` | ~130 | ⭐ Novel |
-| Context-gated contrastive loss | `models/alignment/alignment.py` | ~110 | ⭐ Novel |
-| Multi-label classifier + severity | `models/classifier/classifier.py` | ~90 | ⭐ Novel |
-| Word-level divergence (MFA) | `models/alignment/word_divergence.py` | ~155 | ⭐ Novel |
-| Self-supervised swap objective | `models/conflictnet.py` | ~50 | ⭐ Novel |
-| Curriculum sampler | `training/curriculum.py` | ~60 | Semi-novel |
-| Multi-task uncertainty loss | `models/conflictnet.py` | ~30 | Impl. |
-| Full model assembly + forward | `models/conflictnet.py` | ~200 | Engineering |
-
----
-
-## Datasets
-
-| Dataset | Use | Source |
-|---------|-----|--------|
-| IEMOCAP | Primary train/eval | USC (request) |
-| CREMA-D | Augmentation | HuggingFace |
-| MUStARD++ | Sarcasm labels | GitHub |
-| MELD | Dialogue context | HuggingFace |
-| GoEmotions | Text pre-training | HuggingFace |
-| VoxCeleb1/2 | Speaker embeddings | robots.ox.ac.uk |
-| MUSAN | Noise augmentation | openslr.org |
-
----
-
-## 12-Week Execution Plan
-
-| Week | Milestone |
-|------|-----------|
-| 1 | Fork HuBERT-CLAP → reproduce baseline → swap DistilBERT→DeBERTa |
-| 2 | Swap wav2vec2→Emotion2Vec → compare all 3 audio encoders |
-| 3 | Add ECAPA-TDNN speaker norm → z-score pipeline |
-| 4 | Build Transformer temporal context → integrate |
-| 5 | Multi-label classifier + severity head |
-| 6 | MFA word alignment → per-word divergence features |
-| 7 | Self-supervised swap pre-training → synthetic data via StarGANv2-VC |
-| 8 | Multi-task loss balancing → curriculum learning → full training |
-| 9 | Captum integrated gradients → attribution maps |
-| 10 | Evaluation — fairness, latency, LLM baseline, human eval |
-| 11 | Ablation studies → error analysis |
-| 12 | Paper writing + architecture diagram |
-
----
-
-## Dependencies
-
-```
-torch>=2.1            transformers>=4.36    peft>=0.7
-speechbrain>=1.0      captum>=0.7           fairlearn>=0.9
-librosa>=0.10         praat-parselmouth>=0.4 torchaudio>=2.1
-scikit-learn>=1.3     hydra-core>=1.3       wandb
-audiomentations>=0.34 evaluate              datasets>=2.16
-safetensors>=0.4      funasr  # optional
-# Via conda: montreal-forced-aligner
-# Via git clone: github.com/yl4579/StarGANv2-VC
-```
+See [FUTURE_UPGRADES.md](file:///c:\Users\Nithi\Documents\Github\ConflictNet-main\FUTURE_UPGRADES.md) for architectural plans on pushing model performance to 90%+ Accuracy/F1, including cross-attention fusion, modality dropout, and backbone scaling.
