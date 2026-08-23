@@ -155,6 +155,7 @@ def main():
         )
 
     is_ddp = local_rank != -1 and torch.distributed.is_initialized()
+    prewarmed_model = None
     if is_ddp:
         # Hugging Face and SpeechBrain use disk caches, but they are not a
         # transaction across all of the files a model needs.  In particular,
@@ -168,8 +169,11 @@ def main():
             cuda_rng_states = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
             
             # Pre-warm model
-            warmup_model = _build_model()
-            del warmup_model
+            # Keep this instance for rank 0's eventual training model.  Building
+            # it a second time can take a different optional fallback path than
+            # the first build (notably PEFT / pretrained encoder initialisation),
+            # while every other rank builds only once from the warmed cache.
+            prewarmed_model = _build_model()
             
             # Pre-warm tokenizer (used by all datasets)
             from transformers import AutoTokenizer
@@ -339,7 +343,7 @@ def main():
     if is_ddp:
         if local_rank == 0:
             logger.info("[DDP] Rank 0 building model and warming HF/SpeechBrain cache...")
-            model = _build_model()
+            model = prewarmed_model if prewarmed_model is not None else _build_model()
             logger.info("[DDP] Rank 0 done — releasing barrier for other ranks.")
         torch.distributed.barrier()  # non-zero ranks wait until rank 0 finishes all downloads
         if local_rank != 0:
@@ -352,6 +356,18 @@ def main():
     param_counts = model.count_parameters()
     total_trainable = sum(v["trainable"] for v in param_counts.values())
     logger.info(f"Total trainable parameters: {total_trainable:,}")
+    if is_ddp:
+        trainable_tensors = {
+            name: sum(1 for p in module.parameters() if p.requires_grad)
+            for name, module in model.named_children()
+        }
+        audio = model.audio_encoder
+        logger.info(
+            f"[DDP] Rank {local_rank} trainable tensors by component: {trainable_tensors}; "
+            f"audio_backend={getattr(audio, '_backend', type(audio).__name__)}; "
+            f"audio_fallback={type(getattr(audio, '_model', None)).__name__}; "
+            f"text_backend={type(model.text_encoder.encoder).__name__}"
+        )
 
     # --- Trainer ---
     from training.trainer import ConflictNetTrainer, get_warmup_cosine_scheduler
