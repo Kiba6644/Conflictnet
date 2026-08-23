@@ -24,9 +24,7 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 # Fix for DeBERTa v2 "fabs" TorchScript compilation bug
 os.environ["PYTORCH_JIT"] = "0"
-os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
-os.environ["TQDM_DISABLE"] = "1"
-os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+# Progress bars enabled for fresh instance downloads
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import torch
@@ -35,20 +33,6 @@ from torch.utils.data import DataLoader, ConcatDataset
 # Add project root to sys.path so 'data', 'models' etc. can be imported
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# Suppress Hugging Face & SpeechBrain download progress bars
-logging.getLogger("transformers").setLevel(logging.ERROR)
-logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
-try:
-    from transformers.utils import logging as tf_logging
-    tf_logging.set_verbosity_error()
-    tf_logging.disable_progress_bar()
-except Exception:
-    pass
-try:
-    from huggingface_hub.utils import disable_progress_bars
-    disable_progress_bars()
-except Exception:
-    pass
 
 class FlushHandler(logging.StreamHandler):
     def emit(self, record):

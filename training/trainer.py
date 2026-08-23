@@ -228,7 +228,13 @@ class ConflictNetTrainer:
         self.optimizer.zero_grad()
         self.ctx_cache.clear()
 
-        for batch in self.train_loader:
+        try:
+            from tqdm.auto import tqdm
+            loader_iter = tqdm(self.train_loader, desc=f"Train Epoch {epoch+1}", disable=torch.distributed.is_initialized() and int(os.environ.get("LOCAL_RANK", -1)) != 0)
+        except ImportError:
+            loader_iter = self.train_loader
+
+        for batch in loader_iter:
             # non_blocking=True pairs with pin_memory=True on the DataLoader
             batch = {
                 k: v.to(self.device, non_blocking=True) if isinstance(v, torch.Tensor) else v
@@ -343,7 +349,13 @@ class ConflictNetTrainer:
         all_labels = []
         all_binary = []
 
-        for batch in self.val_loader:
+        try:
+            from tqdm.auto import tqdm
+            loader_iter = tqdm(self.val_loader, desc="Eval", disable=torch.distributed.is_initialized() and int(os.environ.get("LOCAL_RANK", -1)) != 0)
+        except ImportError:
+            loader_iter = self.val_loader
+
+        for batch in loader_iter:
             batch = {
                 k: v.to(self.device, non_blocking=True) if isinstance(v, torch.Tensor) else v
                 for k, v in batch.items()
