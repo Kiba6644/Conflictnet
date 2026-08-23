@@ -107,7 +107,8 @@ def main():
     
     if local_rank != -1:
         torch.cuda.set_device(local_rank)
-        torch.distributed.init_process_group(backend="nccl")
+        import datetime
+        torch.distributed.init_process_group(backend="nccl", timeout=datetime.timedelta(minutes=60))
         args.device = f"cuda:{local_rank}"
 
     torch.manual_seed(args.seed)
