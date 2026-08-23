@@ -62,6 +62,10 @@ def parse_args(argv=None):
     p.add_argument("--output_dir", type=str, default="checkpoints")
     p.add_argument("--audio_encoder", type=str, default="emotion2vec",
                    choices=["emotion2vec", "wavlm", "wavlm_weighted", "wav2vec2"])
+    p.add_argument("--audio_encoder_path", type=str, default=None,
+                   help="Path to local audio encoder directory to bypass ModelScope")
+    p.add_argument("--text_encoder_path", type=str, default=None,
+                   help="Path to local text encoder directory to bypass HuggingFace")
     p.add_argument("--embed_dim", type=int, default=256)
     p.add_argument("--batch_size", type=int, default=None)
     p.add_argument("--epochs", type=int, default=None)
@@ -103,12 +107,20 @@ def parse_args(argv=None):
 
 def main():
     args = parse_args(argv=None)
+    
+    # Set internal environment variables so downstream models load local weights,
+    # ensuring this works even when torchrun spawns fresh child processes.
+    if args.audio_encoder_path:
+        os.environ["CONFLICTNET_EMOTION2VEC_PATH"] = args.audio_encoder_path
+        os.environ["CONFLICTNET_WAVLM_PATH"] = args.audio_encoder_path
+    if args.text_encoder_path:
+        os.environ["CONFLICTNET_DEBERTA_PATH"] = args.text_encoder_path
+
     local_rank = int(os.environ.get("LOCAL_RANK", -1))
     
     if local_rank != -1:
         torch.cuda.set_device(local_rank)
-        import datetime
-        torch.distributed.init_process_group(backend="nccl", timeout=datetime.timedelta(minutes=60))
+        torch.distributed.init_process_group(backend="nccl")
         args.device = f"cuda:{local_rank}"
 
     torch.manual_seed(args.seed)
