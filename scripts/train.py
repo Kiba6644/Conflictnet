@@ -168,22 +168,6 @@ def main():
             label_smoothing=args.label_smoothing,
         )
 
-    def _backend_manifest(model: ConflictNet) -> dict[str, str]:
-        """Return rank-0 encoder choices that must not vary across DDP ranks."""
-        manifest = {
-            "CONFLICTNET_TEXT_BACKEND": getattr(model.text_encoder, "_backend", "pretrained"),
-            "CONFLICTNET_LORA_BACKEND": getattr(model.text_encoder, "_lora_backend", "auto"),
-        }
-        audio = model.audio_encoder
-        if args.audio_encoder == "emotion2vec":
-            manifest["CONFLICTNET_EMOTION2VEC_BACKEND"] = getattr(audio, "_backend", "funasr")
-            fallback = getattr(audio, "_model", None)
-            if fallback is not None:
-                manifest["CONFLICTNET_WAVLM_BACKEND"] = getattr(fallback, "_backend", "auto")
-        elif args.audio_encoder == "wavlm":
-            manifest["CONFLICTNET_WAVLM_BACKEND"] = getattr(audio, "_backend", "auto")
-        return {key: value for key, value in manifest.items() if value != "auto"}
-
     is_ddp = local_rank != -1 and torch.distributed.is_initialized()
     prewarmed_model = None
     if is_ddp:
@@ -204,7 +188,6 @@ def main():
             # the first build (notably PEFT / pretrained encoder initialisation),
             # while every other rank builds only once from the warmed cache.
             prewarmed_model = _build_model()
-            selected_backends = _backend_manifest(prewarmed_model)
             
             # Pre-warm tokenizer (used by all datasets)
             from transformers import AutoTokenizer
@@ -219,24 +202,7 @@ def main():
                     torch.cuda.set_rng_state_all(cuda_rng_states)
             torch.set_rng_state(rng_state)
             logger.info("[DDP] Pre-warm complete — releasing the remaining ranks.")
-        else:
-            selected_backends = None
-
-        # Object collectives are process-group scoped, unlike a hand-off file;
-        # this is reliable even when Kaggle gives torchrun workers different
-        # working-directory mounts.
-        backend_payload = [selected_backends]
-        torch.distributed.broadcast_object_list(
-            backend_payload,
-            src=0,
-            device=torch.device(args.device),
-        )
-        if local_rank != 0:
-            selected_backends = backend_payload[0]
-            if not isinstance(selected_backends, dict):
-                raise RuntimeError("Rank 0 did not broadcast a valid DDP encoder manifest")
-            os.environ.update({str(key): str(value) for key, value in selected_backends.items()})
-            logger.info(f"[DDP] Rank {local_rank} using rank-0 encoder choices: {selected_backends}")
+        torch.distributed.barrier()
 
     # --- Build datasets ---
     from data.datasets import (
