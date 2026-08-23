@@ -11,9 +11,6 @@ Usage:
 
 from __future__ import annotations
 
-import sys
-print(f"[PROCESS START] sys.argv: {sys.argv}", flush=True)
-
 import argparse
 import gc
 import json
@@ -27,7 +24,9 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 # Fix for DeBERTa v2 "fabs" TorchScript compilation bug
 os.environ["PYTORCH_JIT"] = "0"
-# Progress bars enabled for fresh instance downloads
+# Suppress Hugging Face and ModelScope download progress bars to keep Kaggle logs clean
+os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+os.environ["MS_DISABLE_PROGRESS_BAR"] = "1"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import torch
@@ -103,17 +102,12 @@ def parse_args(argv=None):
 
 
 def main():
-    print("[main] ENTERED main() function", flush=True)
     args = parse_args(argv=None)
     local_rank = int(os.environ.get("LOCAL_RANK", -1))
-    print(f"[main] local_rank = {local_rank}", flush=True)
     
     if local_rank != -1:
-        print(f"[main] Setting device to cuda:{local_rank}", flush=True)
         torch.cuda.set_device(local_rank)
-        print(f"[main] Initializing process group (NCCL)... (If it hangs here, it's a Kaggle NCCL issue!)", flush=True)
         torch.distributed.init_process_group(backend="nccl")
-        print(f"[main] Process group initialized successfully on rank {local_rank}", flush=True)
         args.device = f"cuda:{local_rank}"
 
     torch.manual_seed(args.seed)
