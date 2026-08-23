@@ -112,12 +112,71 @@ def find_best_threshold(
     return float(sweep["thresholds"][best_idx]), float(values[best_idx])
 
 
+def find_best_per_class_thresholds(
+    probs_type: np.ndarray,
+    labels_type: np.ndarray,
+    thresholds: Optional[List[float]] = None,
+) -> np.ndarray:
+    """Find the best threshold for each class independently."""
+    thresholds_list = np.linspace(0.05, 0.95, 91).tolist() if thresholds is None else thresholds
+    from sklearn.metrics import f1_score  # type: ignore
+
+    n_types = probs_type.shape[1]
+    best_thresholds = np.zeros(n_types)
+
+    for t in range(n_types):
+        best_f1 = -1.0
+        best_th = 0.5
+        for th in thresholds_list:
+            tp = (probs_type[:, t] >= th).astype(int)
+            if tp.sum() == 0 and labels_type[:, t].sum() == 0:
+                f1 = 1.0
+            elif tp.sum() == 0:
+                f1 = 0.0
+            else:
+                f1 = f1_score(labels_type[:, t], tp, zero_division=0)
+            if f1 > best_f1:
+                best_f1 = f1
+                best_th = th
+        best_thresholds[t] = best_th
+
+    return best_thresholds
+
+
+def fit_temperature_scaling(
+    logits_type: np.ndarray,
+    labels_type: np.ndarray,
+    lr: float = 0.01,
+    max_iter: int = 50,
+) -> float:
+    """Fit a single temperature scaling parameter using NLL."""
+    import torch
+    import torch.nn as nn
+    
+    t_logits = torch.tensor(logits_type, dtype=torch.float32)
+    t_labels = torch.tensor(labels_type, dtype=torch.float32)
+    
+    temperature = nn.Parameter(torch.ones(1) * 1.5)
+    criterion = nn.BCEWithLogitsLoss()
+    optimizer = torch.optim.LBFGS([temperature], lr=lr, max_iter=max_iter)
+    
+    def eval_main():
+        optimizer.zero_grad()
+        loss = criterion(t_logits / temperature, t_labels)
+        loss.backward()
+        return loss
+        
+    optimizer.step(eval_main)
+    return float(temperature.item())
+
+
 def calibrate_multi_source(
     source_probs: Dict[str, np.ndarray],
     source_labels: Dict[str, np.ndarray],
     strategy: str = "mean",
     metric: str = "macro_f1",
     thresholds: Optional[List[float]] = None,
+    source_logits: Optional[Dict[str, np.ndarray]] = None,
 ) -> Dict:
     """Calibrate threshold across multiple data sources.
 
@@ -131,11 +190,23 @@ def calibrate_multi_source(
             - ``"per_source"``: return per-source optimal thresholds.
         metric: Metric to optimise (``"macro_f1"`` or ``"binary_f1"``).
         thresholds: Candidate thresholds (default linspace 0.05–0.95).
+        source_logits: ``{source_name: (N_i, n_types) logits}`` for temperature scaling.
 
     Returns:
         Dict with calibration results.
     """
     source_names = sorted(source_probs.keys())
+    
+    all_probs = np.concatenate([source_probs[n] for n in source_names], axis=0)
+    all_labels = np.concatenate([source_labels[n] for n in source_names], axis=0)
+    
+    # Calculate pooled per-class thresholds
+    per_class_thresholds = find_best_per_class_thresholds(all_probs, all_labels, thresholds)
+    
+    temperature = 1.0
+    if source_logits is not None:
+        all_logits = np.concatenate([source_logits[n] for n in source_names], axis=0)
+        temperature = fit_temperature_scaling(all_logits, all_labels)
 
     if strategy == "per_source":
         per_source = {}
@@ -144,17 +215,17 @@ def calibrate_multi_source(
                 source_probs[name], source_labels[name], metric, thresholds
             )
             per_source[name] = {"threshold": best_th, f"best_{metric}": best_val}
-        return {"strategy": "per_source", "per_source": per_source}
+        return {"strategy": "per_source", "per_source": per_source, "temperature": temperature, "per_class_thresholds": per_class_thresholds.tolist()}
 
     if strategy == "pooled":
-        all_probs = np.concatenate([source_probs[n] for n in source_names], axis=0)
-        all_labels = np.concatenate([source_labels[n] for n in source_names], axis=0)
         best_th, best_val = find_best_threshold(all_probs, all_labels, metric, thresholds)
         return {
             "strategy": "pooled",
             "threshold": best_th,
             f"best_{metric}": best_val,
             "n_total": all_probs.shape[0],
+            "temperature": temperature,
+            "per_class_thresholds": per_class_thresholds.tolist(),
         }
 
     # Mean / median: sweep together
@@ -188,8 +259,9 @@ def calibrate_multi_source(
         "per_source": per_source,
         "all_thresholds": thresholds_list,
         "agg_curve": agg_values.tolist(),
+        "temperature": temperature,
+        "per_class_thresholds": per_class_thresholds.tolist(),
     }
-
 
 # ---------------------------------------------------------------------------
 # Reliability diagram (calibration curve visualisation)
@@ -341,9 +413,9 @@ def _inference(
     model: torch.nn.Module,
     loader: DataLoader,
     device: torch.device,  # type: ignore
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Run inference, return (probs_type, labels_type)."""
-    all_probs, all_labels = [], []
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Run inference, return (probs_type, labels_type, logits_type)."""
+    all_probs, all_labels, all_logits = [], [], []
     with torch.no_grad():
         for batch in loader:
             batch_gpu = {
@@ -359,7 +431,8 @@ def _inference(
             )
             all_probs.append(out.probs_type.cpu().numpy())
             all_labels.append(batch["conflict_type_labels"].numpy())
-    return np.concatenate(all_probs, axis=0), np.concatenate(all_labels, axis=0)
+            all_logits.append(out.logits_type.cpu().numpy())
+    return np.concatenate(all_probs, axis=0), np.concatenate(all_labels, axis=0), np.concatenate(all_logits, axis=0)
 
 
 def main():
@@ -406,6 +479,7 @@ def main():
 
     source_probs = {}
     source_labels = {}
+    source_logits = {}
     for name, (cls, kwargs) in sources.items():
         try:
             ds = cls(**kwargs)
@@ -416,9 +490,10 @@ def main():
                 ds, batch_size=args.batch_size, shuffle=False,
                 num_workers=2, pin_memory=True, collate_fn=conflictnet_collate_fn,
             )
-            probs, labels = _inference(model, loader, device)
+            probs, labels, logits = _inference(model, loader, device)
             source_probs[name] = probs
             source_labels[name] = labels
+            source_logits[name] = logits
             logger.info(f"[Calib] {name}: {len(ds)} samples")
         except Exception as e:
             logger.warning(f"[Calib] {name}: failed to load: {e}")
@@ -431,6 +506,7 @@ def main():
         source_probs, source_labels,
         strategy=args.strategy,
         metric="macro_f1",
+        source_logits=source_logits,
     )
     logger.info(f"[Calib] {args.strategy} threshold: {result['threshold']:.3f}")
 

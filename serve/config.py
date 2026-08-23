@@ -1,6 +1,7 @@
 """Serving configuration — loaded from environment or defaults."""
 
 from dataclasses import dataclass, field
+import typing
 from typing import List
 
 
@@ -44,7 +45,7 @@ class ServeConfig:
                     kwargs[f] = int(env_val)
                 elif field_type is float:
                     kwargs[f] = float(env_val)
-                elif field_type is list and "str" in str(field_type):
+                elif field_type is list or getattr(field_type, "__origin__", None) is list or (hasattr(typing, "get_origin") and typing.get_origin(field_type) is list):
                     kwargs[f] = [x.strip() for x in env_val.split(",")]
                 else:
                     kwargs[f] = env_val

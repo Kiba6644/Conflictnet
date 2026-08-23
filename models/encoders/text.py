@@ -25,8 +25,8 @@ class DeBERTaEncoder(nn.Module):
         self,
         model_name: str = "microsoft/deberta-v3-large",
         use_lora: bool = True,
-        lora_r: int = 64,
-        lora_alpha: int = 128,
+        lora_r: int = 32,
+        lora_alpha: int = 64,
         vocab_size: int = 128000,
         embed_dim: int = 1024,
         gradient_checkpointing: bool = False,
@@ -41,12 +41,11 @@ class DeBERTaEncoder(nn.Module):
         self._lora_r = lora_r
         self._lora_alpha = lora_alpha
         self.encoder = None
-        self.tokenizer = None
+
         requested_backend = os.environ.get("CONFLICTNET_TEXT_BACKEND", "auto")
 
         if requested_backend == "fallback":
             self.encoder = _TextFallbackEncoder(vocab_size, embed_dim)
-            self.tokenizer = None
             self._backend = "fallback"
             logger.info("[DeBERTa] Using DDP-selected fallback text encoder")
             return
@@ -57,7 +56,6 @@ class DeBERTaEncoder(nn.Module):
             tf_logging.set_verbosity_error()
             tf_logging.disable_progress_bar()
             self.encoder = AutoModel.from_pretrained(model_name)
-            self.tokenizer = AutoTokenizer.from_pretrained(model_name)
             self.output_dim = self.encoder.config.hidden_size
             # Gradient checkpointing: reduces peak VRAM ~25% on T4 (helpful for DDP)
             if gradient_checkpointing and hasattr(self.encoder, "gradient_checkpointing_enable"):
@@ -78,7 +76,6 @@ class DeBERTaEncoder(nn.Module):
             )
 
         self.encoder = _TextFallbackEncoder(vocab_size, embed_dim)
-        self.tokenizer = None  # tokenizer provided externally
         self._backend = "fallback"
 
     def _apply_lora(self, r: int, alpha: int):
@@ -95,7 +92,7 @@ class DeBERTaEncoder(nn.Module):
                 task_type=TaskType.FEATURE_EXTRACTION,
                 r=r,
                 lora_alpha=alpha,
-                target_modules=["query_proj", "value_proj", "key_proj"],
+                target_modules=["query_proj", "value_proj", "key_proj", "output"],
                 lora_dropout=0.05,
                 bias="none",
             )

@@ -154,27 +154,31 @@ def _parse_textgrid_fallback(textgrid_path: str) -> List[Dict[str, Any]]:
         lines = f.readlines()
 
     in_word_tier = False
+    current_interval = {}
+    
     for line in lines:
         stripped = line.strip()
-        if stripped.lower().startswith("name"):
+        if stripped.startswith("name =") or stripped.startswith("name="):
             if "word" in stripped.lower():
                 in_word_tier = True
             else:
                 in_word_tier = False
-        if in_word_tier and stripped.startswith("intervals ["):
-            in_word_tier = True
-        if in_word_tier and "text =" in stripped:
-            text = stripped.split("=", 1)[1].strip().strip('"')
-            if text:
-                words.append({"word": text, "start": 0.0, "end": 0.0})
-        if in_word_tier and "xmin =" in stripped and words:
-            val = float(stripped.split("=", 1)[1].strip())
-            if words[-1]["start"] == 0.0:
-                words[-1]["start"] = val
-        if in_word_tier and "xmax =" in stripped and words:
-            val = float(stripped.split("=", 1)[1].strip())
-            if words[-1]["end"] == 0.0:
-                words[-1]["end"] = val
+                
+        if in_word_tier:
+            if stripped.startswith("intervals ["):
+                if current_interval.get("word"):
+                    words.append(current_interval)
+                current_interval = {"word": "", "start": 0.0, "end": 0.0}
+            elif stripped.startswith("xmin ="):
+                current_interval["start"] = float(stripped.split("=", 1)[1].strip())
+            elif stripped.startswith("xmax ="):
+                current_interval["end"] = float(stripped.split("=", 1)[1].strip())
+            elif stripped.startswith("text ="):
+                text = stripped.split("=", 1)[1].strip().strip('"')
+                current_interval["word"] = text
+                
+    if in_word_tier and current_interval.get("word"):
+        words.append(current_interval)
 
     return words
 

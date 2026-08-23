@@ -25,7 +25,7 @@ import torch.nn.functional as F
 from .encoders import build_audio_encoder, DeBERTaEncoder
 from .speaker_norm import SpeakerNormalizer
 from .temporal import TransformerTemporalContext
-from .alignment import ProjectionHead, ContextGatedContrastiveLoss, CrossModalAttention
+from .alignment import ProjectionHead, ContextGatedContrastiveLoss, CrossModalAttention, MoEFusion
 from .alignment.word_divergence import WordLevelDivergence
 from .classifier import ConflictClassifier
 
@@ -266,13 +266,27 @@ class ConflictNet(nn.Module):
         # Gating network: fuse (audio_proj + text_proj + speaker_feat) → fused_embed
         # Input: [audio_proj ∥ text_proj ∥ speaker_feat] = 3 × embed_dim
         fuse_in = embed_dim * 3 if use_speaker_norm else embed_dim * 2
-        self.fusion_gate = nn.Sequential(
-            nn.Linear(fuse_in, embed_dim * 2),
-            nn.GELU(),
-            nn.LayerNorm(embed_dim * 2),
-            nn.Linear(embed_dim * 2, embed_dim),
-            nn.LayerNorm(embed_dim),
-        )
+        gate_in = 0
+        if use_speaker_norm:
+            gate_in += embed_dim
+        if use_word_divergence:
+            gate_in += 11
+
+        if gate_in > 0:
+            self.fusion_gate = MoEFusion(
+                fuse_in=fuse_in,
+                embed_dim=embed_dim,
+                num_experts=4,
+                gate_in=gate_in,
+            )
+        else:
+            self.fusion_gate = nn.Sequential(
+                nn.Linear(fuse_in, embed_dim * 2),
+                nn.GELU(),
+                nn.LayerNorm(embed_dim * 2),
+                nn.Linear(embed_dim * 2, embed_dim),
+                nn.LayerNorm(embed_dim),
+            )
 
         # 4. Temporal context (optional — disabled in ablation)
         self.temporal = TransformerTemporalContext(
@@ -414,13 +428,26 @@ class ConflictNet(nn.Module):
         audio_embed: torch.Tensor,
         text_embed: torch.Tensor,
         speaker_feat: torch.Tensor,
+        word_div_feats: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Fuse audio, text, speaker embeddings via gated MLP."""
+        """Fuse audio, text, speaker embeddings via gated MLP or MoE."""
         if self.use_speaker_norm:
             combined = torch.cat([audio_embed, text_embed, speaker_feat], dim=-1)
         else:
             combined = torch.cat([audio_embed, text_embed], dim=-1)
-        return self.fusion_gate(combined)  # (B, embed_dim)
+            
+        if isinstance(self.fusion_gate, MoEFusion):
+            gate_feats = []
+            if self.use_speaker_norm:
+                gate_feats.append(speaker_feat)
+            if self.use_word_divergence:
+                if word_div_feats is None:
+                    word_div_feats = torch.zeros(audio_embed.size(0), 11, device=audio_embed.device)
+                gate_feats.append(word_div_feats)
+            gate_feat_tensor = torch.cat(gate_feats, dim=-1)
+            return self.fusion_gate(combined, gate_feat_tensor)
+        else:
+            return self.fusion_gate(combined)  # (B, embed_dim)
 
     # ------------------------------------------------------------------
     # Full forward pass
@@ -458,7 +485,7 @@ class ConflictNet(nn.Module):
     ) -> ConflictNetOutput:
 
         # 1. Encode (all pure-torch — numpy preprocessing done in collate_fn)
-        need_frames = self.word_divergence is not None and word_timestamps is not None
+        need_frames = (self.word_divergence is not None and word_timestamps is not None) or self.cross_modal_attn is not None
         audio_embed, text_embed, speaker_feat, audio_frames, text_tokens = self.encode(
             audio, input_ids, attention_mask,
             audio_attention_mask=audio_attention_mask,
@@ -476,12 +503,36 @@ class ConflictNet(nn.Module):
                 audio_embed, text_embed,
                 context_seq=context_embeds,
                 context_padding=context_padding,
+                audio_seq=audio_frames if need_frames else None,
+                text_seq=text_tokens if need_frames else None,
             )
 
-        # 3. Fuse current turn
-        fused_embed = self.fuse(audio_embed, text_embed, speaker_feat)  # (B, D)
+        # 3. Word-level divergence features (needed for MoEFusion gate)
+        word_div_feats = None
+        if (
+            self.word_divergence is not None
+            and need_frames
+            and audio_frames is not None
+            and text_tokens is not None
+        ):
+            assert word_timestamps is not None and token_word_boundaries is not None
+            word_div_feats = self.word_divergence.forward_from_encoder_hidden(
+                audio_frame_embeds=audio_frames,
+                text_token_embeds=text_tokens,
+                word_timestamps=word_timestamps,
+                token_word_boundaries=token_word_boundaries,
+            )
+        elif self.word_divergence is not None and not self._word_div_warned:
+            logger.warning(
+                "WordDivergence unavailable for this batch (missing alignments or "
+                "encoder frame features); using zero divergence features."
+            )
+            self._word_div_warned = True
 
-        # 4. Temporal context (optional — skip if disabled for ablation)
+        # 4. Fuse current turn
+        fused_embed = self.fuse(audio_embed, text_embed, speaker_feat, word_div_feats)  # (B, D)
+
+        # 5. Temporal context (optional — skip if disabled for ablation)
         if self.temporal is not None:
             current_turn = fused_embed.unsqueeze(1)  # (B, 1, D)
             if context_embeds is not None:
@@ -503,28 +554,6 @@ class ConflictNet(nn.Module):
             per_turn_ctx = fused_embed.unsqueeze(1)
             context_pooled = fused_embed
             current_ctx = fused_embed
-
-        # 4. Word-level divergence features
-        word_div_feats = None
-        if (
-            self.word_divergence is not None
-            and need_frames
-            and audio_frames is not None
-            and text_tokens is not None
-        ):
-            assert word_timestamps is not None and token_word_boundaries is not None
-            word_div_feats = self.word_divergence.forward_from_encoder_hidden(
-                audio_frame_embeds=audio_frames,
-                text_token_embeds=text_tokens,
-                word_timestamps=word_timestamps,
-                token_word_boundaries=token_word_boundaries,
-            )
-        elif self.word_divergence is not None and not self._word_div_warned:
-            logger.warning(
-                "WordDivergence unavailable for this batch (missing alignments or "
-                "encoder frame features); using zero divergence features."
-            )
-            self._word_div_warned = True
 
         # 5. Classify (with speaker-adaptive threshold when speaker_feat available)
         logits_type, probs_type, severity, conflict_flag = self.classifier(

@@ -37,14 +37,17 @@ def benchmark_latency(
 
     latencies = sorted(latencies)
     avg_ms = sum(latencies) / len(latencies)
-    std_ms = (sum((lat - avg_ms) ** 2 for lat in latencies) / len(latencies)) ** 0.5
+    
+    n = len(latencies)
+    # Use sample standard deviation (N-1)
+    std_ms = (sum((lat - avg_ms) ** 2 for lat in latencies) / max(1, n - 1)) ** 0.5
     batch_size = dummy_batch["audio"].size(0)
 
     return {
         "avg_ms": round(avg_ms, 2),
         "std_ms": round(std_ms, 2),
-        "p95_ms": round(latencies[int(0.95 * len(latencies))], 2),
-        "p99_ms": round(latencies[int(0.99 * len(latencies))], 2),
+        "p95_ms": round(latencies[int(0.95 * (n - 1))], 2),
+        "p99_ms": round(latencies[int(0.99 * (n - 1))], 2),
         "throughput": round(batch_size / (avg_ms / 1000), 1),
         "batch_size": batch_size,
         "n_iters": n_iters,

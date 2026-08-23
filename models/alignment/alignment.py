@@ -16,6 +16,16 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+def drop_path(x, drop_prob: float = 0., training: bool = False, scale_by_keep: bool = True):
+    if drop_prob == 0. or not training:
+        return x
+    keep_prob = 1 - drop_prob
+    shape = (x.shape[0],) + (1,) * (x.ndim - 1)
+    random_tensor = x.new_empty(shape).bernoulli_(keep_prob)
+    if keep_prob > 0.0 and scale_by_keep:
+        random_tensor.div_(keep_prob)
+    return x * random_tensor
+
 
 class ProjectionHead(nn.Module):
     """MLP projection head: encoder_dim → embed_dim.
@@ -39,47 +49,29 @@ class ProjectionHead(nn.Module):
 
 
 class CrossModalAttention(nn.Module):
-    """Direct audio↔text cross-attention with optional dialogue context.
+    """Token-Level Multi-Layer Cross-Modal Attention with ModalDrop."""
 
-    Replaces the earlier CrossAttentionInjector (which only attended over
-    dialogue history). Instead of each modality independently attending
-    to past context, this module enables:
-
-      1. Audio attends to text (direct cross-modal alignment)
-      2. Text attends to audio (direct cross-modal alignment)
-      3. Both also optionally attend to dialogue history
-
-    Flow (no context):
-        text_embed  (B, 1, D) ──→ K/V
-        audio_embed (B, 1, D) ──→ Q ──→ CrossAttn ──→ audio_mod
-
-        audio_embed (B, 1, D) ──→ K/V
-        text_embed  (B, 1, D) ──→ Q ──→ CrossAttn ──→ text_mod
-
-    Flow (with context):
-        K/V = [other_modality_embed || context_seq]
-
-    Each modality gets its own independent cross-attention layer so they
-    can learn modality-specific cross-modal and context patterns.
-
-    Args:
-        embed_dim: Shared embedding dimensionality.
-        n_heads: Number of attention heads per modality.
-        dropout: Dropout probability in the cross-attention layer.
-    """
-
-    def __init__(self, embed_dim: int = 256, n_heads: int = 4, dropout: float = 0.1):
+    def __init__(self, embed_dim: int = 256, n_heads: int = 8, dropout: float = 0.1, num_layers: int = 2):
         super().__init__()
         self.embed_dim = embed_dim
+        self.num_layers = num_layers
+        self.modal_drop_p = 0.15
 
-        self.audio_cross_attn = nn.MultiheadAttention(
-            embed_dim, n_heads, dropout=dropout, batch_first=True
-        )
-        self.text_cross_attn = nn.MultiheadAttention(
-            embed_dim, n_heads, dropout=dropout, batch_first=True
-        )
-        self.norm_audio = nn.LayerNorm(embed_dim)
-        self.norm_text = nn.LayerNorm(embed_dim)
+        self.audio_layers = nn.ModuleList([
+            nn.ModuleDict({
+                'cross_attn': nn.MultiheadAttention(embed_dim, n_heads, dropout=dropout, batch_first=True),
+                'norm': nn.LayerNorm(embed_dim)
+            })
+            for _ in range(num_layers)
+        ])
+        
+        self.text_layers = nn.ModuleList([
+            nn.ModuleDict({
+                'cross_attn': nn.MultiheadAttention(embed_dim, n_heads, dropout=dropout, batch_first=True),
+                'norm': nn.LayerNorm(embed_dim)
+            })
+            for _ in range(num_layers)
+        ])
 
     def forward(
         self,
@@ -87,69 +79,75 @@ class CrossModalAttention(nn.Module):
         text_embed: torch.Tensor,
         context_seq: Optional[torch.Tensor] = None,
         context_padding: Optional[torch.Tensor] = None,
+        audio_seq: Optional[torch.Tensor] = None,
+        text_seq: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Apply cross-modal attention.
-
-        Args:
-            audio_embed: (B, D) current-turn audio embedding.
-            text_embed: (B, D) current-turn text embedding.
-            context_seq: (B, T, D) or None — fused embeddings of past turns.
-            context_padding: (B, T) bool or None — True for padding positions.
-
-        Returns:
-            audio_out: (B, D) cross-modal modulated audio embedding.
-            text_out:  (B, D) cross-modal modulated text embedding.
-        """
+        
         B = audio_embed.size(0)
         device = audio_embed.device
         dtype = audio_embed.dtype
 
-        # Build K/V sequences: each modality attends to the other + optional context
-        text_kv = text_embed.unsqueeze(1)  # (B, 1, D)
-        audio_kv = audio_embed.unsqueeze(1)  # (B, 1, D)
-        kv_padding_audio: Optional[torch.Tensor] = None
-        kv_padding_text: Optional[torch.Tensor] = None
+        # ModalDrop (during training)
+        if self.training:
+            if torch.rand(1).item() < self.modal_drop_p:
+                audio_embed = torch.zeros_like(audio_embed)
+                if audio_seq is not None:
+                    audio_seq = torch.zeros_like(audio_seq)
+            if torch.rand(1).item() < self.modal_drop_p:
+                text_embed = torch.zeros_like(text_embed)
+                if text_seq is not None:
+                    text_seq = torch.zeros_like(text_seq)
 
-        if context_seq is not None:
-            _, T, D = context_seq.shape
-            assert D == self.embed_dim
-            # Append context to K/V sequences
-            text_kv = torch.cat([text_kv, context_seq], dim=1)     # (B, 1+T, D)
-            audio_kv = torch.cat([audio_kv, context_seq], dim=1)   # (B, 1+T, D)
-            if context_padding is not None:
-                valid = torch.zeros(B, 1, dtype=torch.bool, device=device)
-                kv_padding_audio = torch.cat([valid, context_padding], dim=1)
-                # Guard against all-masked context: insert a neutral unmasked key
-                fully_masked = context_padding.all(dim=1)  # (B,)
-                if fully_masked.any():
-                    neutral = torch.zeros(B, 1, D, device=device, dtype=dtype)
-                    text_kv = torch.cat([text_kv, neutral], dim=1)
-                    audio_kv = torch.cat([audio_kv, neutral], dim=1)
-                    pad_ext = torch.zeros(B, 1, dtype=torch.bool, device=device)
-                    kv_padding_audio = torch.cat([kv_padding_audio, pad_ext], dim=1)
-                # BUG FIX: clone AFTER all extensions so both masks match the
-                # final K/V length. Previously cloned before the neutral-key
-                # extension, making kv_padding_text 1 slot shorter than text_kv
-                # on the first turn of every dialogue (cold-start), which caused
-                # a shape mismatch crash inside nn.MultiheadAttention.
-                kv_padding_text = kv_padding_audio.clone()
+        a_seq = audio_seq if audio_seq is not None else audio_embed.unsqueeze(1)
+        t_seq = text_seq if text_seq is not None else text_embed.unsqueeze(1)
+        
+        for i in range(self.num_layers):
+            text_kv = t_seq
+            audio_kv = a_seq
+            
+            kv_padding_audio: Optional[torch.Tensor] = None
+            kv_padding_text: Optional[torch.Tensor] = None
 
-        # Audio path: audio attends to text (+ optional context)
-        q_audio = audio_embed.unsqueeze(1)  # (B, 1, D)
-        audio_mod, _ = self.audio_cross_attn(
-            q_audio, text_kv, text_kv,
-            key_padding_mask=kv_padding_audio,
-        )
-        audio_out = self.norm_audio(audio_embed + audio_mod.squeeze(1))
+            if context_seq is not None:
+                _, T, D = context_seq.shape
+                assert D == self.embed_dim
+                text_kv = torch.cat([text_kv, context_seq], dim=1)
+                audio_kv = torch.cat([audio_kv, context_seq], dim=1)
+                if context_padding is not None:
+                    valid_t = torch.zeros(B, t_seq.size(1), dtype=torch.bool, device=device)
+                    valid_a = torch.zeros(B, a_seq.size(1), dtype=torch.bool, device=device)
+                    kv_padding_audio = torch.cat([valid_t, context_padding], dim=1)
+                    kv_padding_text = torch.cat([valid_a, context_padding], dim=1)
+                    
+                    fully_masked = context_padding.all(dim=1)
+                    if fully_masked.any():
+                        neutral = torch.zeros(B, 1, D, device=device, dtype=dtype)
+                        text_kv = torch.cat([text_kv, neutral], dim=1)
+                        audio_kv = torch.cat([audio_kv, neutral], dim=1)
+                        pad_ext = torch.zeros(B, 1, dtype=torch.bool, device=device)
+                        kv_padding_audio = torch.cat([kv_padding_audio, pad_ext], dim=1)
+                        kv_padding_text = torch.cat([kv_padding_text, pad_ext], dim=1)
 
-        # Text path: text attends to audio (+ optional context)
-        q_text = text_embed.unsqueeze(1)  # (B, 1, D)
-        text_mod, _ = self.text_cross_attn(
-            q_text, audio_kv, audio_kv,
-            key_padding_mask=kv_padding_text,
-        )
-        text_out = self.norm_text(text_embed + text_mod.squeeze(1))
+            # Audio attends to Text (+ context)
+            q_audio = a_seq
+            a_mod, _ = self.audio_layers[i]['cross_attn'](
+                q_audio, text_kv, text_kv,
+                key_padding_mask=kv_padding_audio,
+            )
+            a_seq = self.audio_layers[i]['norm'](a_seq + drop_path(a_mod, 0.1, self.training))
 
+            # Text attends to Audio (+ context)
+            q_text = t_seq
+            t_mod, _ = self.text_layers[i]['cross_attn'](
+                q_text, audio_kv, audio_kv,
+                key_padding_mask=kv_padding_text,
+            )
+            t_seq = self.text_layers[i]['norm'](t_seq + drop_path(t_mod, 0.1, self.training))
+        
+        # Mean pooling to return (B, D)
+        audio_out = a_seq.mean(dim=1) if audio_seq is not None else a_seq.squeeze(1)
+        text_out = t_seq.mean(dim=1) if text_seq is not None else t_seq.squeeze(1)
+        
         return audio_out, text_out
 
 
@@ -264,3 +262,49 @@ class ContextGatedContrastiveLoss(nn.Module):
                 ).mean()
 
         return contrastive_loss + conflict_sep_loss
+
+class MoEFusion(nn.Module):
+    """Gated Multi-Modal Mixture-of-Experts (MoE) Fusion.
+
+    Replaces the linear fusion gate with 4 expert MLPs + a gating network.
+    The gating network selects/weights experts based on `speaker_feat` and `word_div` features.
+    """
+
+    def __init__(
+        self,
+        fuse_in: int,
+        embed_dim: int = 256,
+        num_experts: int = 4,
+        gate_in: int = 256 + 11,
+    ):
+        super().__init__()
+        self.num_experts = num_experts
+
+        self.experts = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(fuse_in, embed_dim * 2),
+                nn.GELU(),
+                nn.LayerNorm(embed_dim * 2),
+                nn.Linear(embed_dim * 2, embed_dim),
+                nn.LayerNorm(embed_dim),
+            )
+            for _ in range(num_experts)
+        ])
+
+        self.gate = nn.Sequential(
+            nn.Linear(gate_in, 64),
+            nn.GELU(),
+            nn.Linear(64, num_experts)
+        )
+
+    def forward(self, x: torch.Tensor, gate_feat: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: (B, fuse_in) combined modalities.
+            gate_feat: (B, gate_in) gate features (e.g., [speaker_feat, word_div_feats]).
+        Returns:
+            (B, embed_dim) fused embedding.
+        """
+        weights = F.softmax(self.gate(gate_feat), dim=-1)  # (B, num_experts)
+        expert_outputs = torch.stack([expert(x) for expert in self.experts], dim=1)  # (B, num_experts, embed_dim)
+        return (expert_outputs * weights.unsqueeze(-1)).sum(dim=1)

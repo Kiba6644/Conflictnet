@@ -147,7 +147,7 @@ class WordLevelDivergence(nn.Module):
         divergence_threshold: Per-word divergence above this is "conflict word".
     """
 
-    DIVERGENCE_FEAT_DIM = 8
+    DIVERGENCE_FEAT_DIM = 11
 
     def __init__(
         self,
@@ -203,10 +203,25 @@ class WordLevelDivergence(nn.Module):
 
         n_words_norm = torch.tensor(min(n / 50.0, 1.0), device=divergences.device)
 
+        # skewness
+        if n > 2 and std_div > 1e-6:
+            skewness = ((divergences - mean_div) ** 3).mean() / (std_div ** 3)
+        else:
+            skewness = divergences.new_zeros(())
+
+        # entropy
+        if n > 1 and divergences.sum() > 1e-6:
+            p = divergences / divergences.sum()
+            entropy = -(p * torch.log(p + 1e-9)).sum()
+        else:
+            entropy = divergences.new_zeros(())
+
+        turn_position_of_max = top_positions[0]
+
         return torch.stack([
             max_div, mean_div, std_div.squeeze(), n_conflict,
             top_positions[0], top_positions[1], top_positions[2],
-            n_words_norm,
+            n_words_norm, skewness, entropy, turn_position_of_max,
         ])
 
     def forward_from_precomputed(

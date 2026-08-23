@@ -46,6 +46,36 @@ class SpeakerRoleEmbedding(nn.Module):
         return x + self.embedding(speaker_roles)
 
 
+def drop_path(x, drop_prob: float = 0., training: bool = False, scale_by_keep: bool = True):
+    if drop_prob == 0. or not training:
+        return x
+    keep_prob = 1 - drop_prob
+    shape = (x.shape[0],) + (1,) * (x.ndim - 1)
+    random_tensor = x.new_empty(shape).bernoulli_(keep_prob)
+    if keep_prob > 0.0 and scale_by_keep:
+        random_tensor.div_(keep_prob)
+    return x * random_tensor
+
+class DropPathTransformerEncoderLayer(nn.TransformerEncoderLayer):
+    def __init__(self, *args, drop_path_prob=0.1, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.drop_path_prob = drop_path_prob
+
+    def forward(self, src: torch.Tensor, src_mask: Optional[torch.Tensor] = None, src_key_padding_mask: Optional[torch.Tensor] = None, is_causal: bool = False) -> torch.Tensor:
+        # Pre-LN architecture
+        x = src
+        if self.norm_first:
+            attn_out = self._sa_block(self.norm1(x), src_mask, src_key_padding_mask, is_causal=is_causal)
+            x = x + drop_path(attn_out, self.drop_path_prob, self.training)
+            ff_out = self._ff_block(self.norm2(x))
+            x = x + drop_path(ff_out, self.drop_path_prob, self.training)
+        else:
+            attn_out = self._sa_block(x, src_mask, src_key_padding_mask, is_causal=is_causal)
+            x = self.norm1(x + drop_path(attn_out, self.drop_path_prob, self.training))
+            ff_out = self._ff_block(x)
+            x = self.norm2(x + drop_path(ff_out, self.drop_path_prob, self.training))
+        return x
+
 class TransformerTemporalContext(nn.Module):
     """Causal Transformer encoder over a dialogue turn sequence.
 
@@ -86,10 +116,7 @@ class TransformerTemporalContext(nn.Module):
 
         ff_dim = ff_dim or embed_dim * 4
 
-        self.pos_encoding = LearnedPositionalEncoding(max_turns, embed_dim)
-        self.speaker_role_emb = SpeakerRoleEmbedding(embed_dim) if use_speaker_roles else None
-
-        encoder_layer = nn.TransformerEncoderLayer(
+        encoder_layer = DropPathTransformerEncoderLayer(
             d_model=embed_dim,
             nhead=n_heads,
             dim_feedforward=ff_dim,
@@ -97,6 +124,7 @@ class TransformerTemporalContext(nn.Module):
             activation="gelu",
             batch_first=True,  # (B, T, D) convention throughout
             norm_first=True,   # Pre-LN for training stability
+            drop_path_prob=0.1,
         )
         self.transformer = nn.TransformerEncoder(
             encoder_layer,

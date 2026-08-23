@@ -151,39 +151,49 @@ class ConflictNetTrainer:
             device=device,
         )
 
+        from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
+        # Create EMA model with decay=0.9999
+        self.ema_model = AveragedModel(self.model, multi_avg_fn=get_ema_multi_avg_fn(0.9999))
+
     def _setup_optimizer(self):
-        lr = self.cfg.get("lr", 2e-5)
+        lr = self.cfg.get("lr", 5e-5)
         # Use fused=True if supported (PyTorch 2.0+)
         kwargs = {}
         if hasattr(torch.optim.AdamW, "__init__") and "fused" in AdamW.__init__.__code__.co_varnames:
             kwargs["fused"] = True
 
-        # Standard practice: do NOT apply weight decay to bias terms and
-        # LayerNorm parameters — this follows the BERT/DeBERTa fine-tuning
-        # recipe and typically yields slightly better accuracy.
         no_decay = {"bias", "layer_norm.weight", "layernorm.weight", "LayerNorm.weight"}
 
-        # Encoder params (LoRA adapters in DeBERTa)
-        encoder_params_wd  = [p for n, p in self.model.named_parameters()
-                               if p.requires_grad and "text_encoder" in n
-                               and not any(nd in n for nd in no_decay)]
-        encoder_params_nwd = [p for n, p in self.model.named_parameters()
-                               if p.requires_grad and "text_encoder" in n
-                               and any(nd in n for nd in no_decay)]
-        # Newly-initialized heads (projection, fusion, temporal, classifier)
-        head_params_wd  = [p for n, p in self.model.named_parameters()
-                            if p.requires_grad and "text_encoder" not in n
-                            and not any(nd in n for nd in no_decay)]
-        head_params_nwd = [p for n, p in self.model.named_parameters()
-                            if p.requires_grad and "text_encoder" not in n
-                            and any(nd in n for nd in no_decay)]
+        # Groups for LLRD
+        audio_encoder_params = []
+        deberta_lower_params = []
+        deberta_lora_params = []
+        head_params = []
+        classifier_params = []
 
-        self.optimizer = AdamW([
-            {"params": encoder_params_wd,  "lr": lr,       "weight_decay": 0.01, "name": "encoder"},
-            {"params": encoder_params_nwd, "lr": lr,       "weight_decay": 0.0,  "name": "encoder_nwd"},
-            {"params": head_params_wd,     "lr": lr * 10,  "weight_decay": 0.01, "name": "heads"},
-            {"params": head_params_nwd,    "lr": lr * 10,  "weight_decay": 0.0,  "name": "heads_nwd"},
-        ], **kwargs)
+        for n, p in self.model.named_parameters():
+            if not p.requires_grad:
+                continue
+                
+            is_no_decay = any(nd in n for nd in no_decay)
+            weight_decay = 0.0 if is_no_decay else 0.01
+
+            if "audio_encoder" in n:
+                audio_encoder_params.append({"params": p, "lr": 0.0, "weight_decay": weight_decay})
+            elif "text_encoder" in n:
+                if "lora" in n:
+                    deberta_lora_params.append({"params": p, "lr": 2e-5, "weight_decay": weight_decay})
+                else:
+                    deberta_lower_params.append({"params": p, "lr": 1e-5, "weight_decay": weight_decay})
+            elif "classifier" in n:
+                classifier_params.append({"params": p, "lr": 1e-4, "weight_decay": weight_decay})
+            else:
+                head_params.append({"params": p, "lr": 5e-5, "weight_decay": weight_decay})
+
+        self.optimizer = AdamW(
+            audio_encoder_params + deberta_lower_params + deberta_lora_params + head_params + classifier_params,
+            **kwargs
+        )
         grad_accum_steps = int(self.cfg.get("gradient_accumulation_steps", 1))
         steps_per_epoch = max(1, len(self.train_loader) // grad_accum_steps)
         epochs = int(self.cfg.get("epochs") or 50)
@@ -340,6 +350,7 @@ class ConflictNetTrainer:
                 else:
                     self.optimizer.step()
                 self.scheduler.step()
+                self.ema_model.update_parameters(self.model)
                 self.optimizer.zero_grad()
                 self.global_step += 1
             else:
@@ -370,6 +381,7 @@ class ConflictNetTrainer:
             else:
                 self.optimizer.step()
             self.scheduler.step()
+            self.ema_model.update_parameters(self.model)
             # BUG FIX: zero_grad() was missing here. Without it, stale gradients
             # from the end of this epoch survive into the first batch of the next
             # epoch and get double-accumulated, corrupting the first update.
@@ -391,7 +403,9 @@ class ConflictNetTrainer:
         # val loop.  When rank 1 exits early below and blocks at the metric
         # broadcast, any DDP collective issued by rank 0 inside self.model(…)
         # would have no partner on rank 1, causing a 300 s NCCL timeout.
-        _model_for_eval = getattr(self.model, "module", self.model)
+        
+        # Use EMA model for evaluation
+        _model_for_eval = getattr(self.ema_model, "module", self.ema_model)
 
         if is_ddp and local_rank != 0:
             # Rank 0 owns the complete validation loader. Waiting here avoids
@@ -669,9 +683,9 @@ class ConflictNetTrainer:
         # Save the underlying module so a checkpoint made by DDP can be loaded
         # by single-GPU evaluation/serving without every key being prefixed with
         # ``module.``.
-        model_for_state = self.model.module if isinstance(
-            self.model, nn.parallel.DistributedDataParallel
-        ) else self.model
+        model_for_state = self.ema_model.module if isinstance(
+            self.ema_model, nn.parallel.DistributedDataParallel
+        ) else getattr(self.ema_model, "module", self.ema_model)
         model_state = model_for_state.state_dict()
         try:
             from safetensors.torch import save_file as st_save
@@ -731,7 +745,9 @@ class ConflictNetTrainer:
             # in the portable, unwrapped format above.
             if state and all(key.startswith("module.") for key in state):
                 state = {key.removeprefix("module."): value for key, value in state.items()}
-            return model_for_state.load_state_dict(state, strict=False)
+            res = model_for_state.load_state_dict(state, strict=False)
+            self.ema_model.module.load_state_dict(model_for_state.state_dict())
+            return res
 
         if checkpoint_path.suffix == ".safetensors":
             # Safe path: safetensors model weights + sidecar files

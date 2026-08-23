@@ -78,9 +78,10 @@ def main():
 
     model = ConflictNet()
     if args.checkpoint:
-        from models.checkpoint_utils import load_checkpoint_state
-        state = load_checkpoint_state(args.checkpoint, device=args.device)
-        missing, unexpected = model.load_state_dict(state, strict=False)
+        from models.checkpoint_utils import load_checkpoint_state, extract_model_state
+        ckpt = load_checkpoint_state(args.checkpoint, device=args.device)
+        model_state = extract_model_state(ckpt)
+        missing, unexpected = model.load_state_dict(model_state, strict=False)
         if missing:
             logger.warning(f"Missing keys: {missing}")
         if unexpected:

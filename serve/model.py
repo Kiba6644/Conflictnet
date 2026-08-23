@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 import torchaudio
 import torchaudio.functional as AF
+import numpy as np
 from transformers import AutoTokenizer
 
 from models.checkpoint_utils import load_checkpoint_state, extract_model_state
@@ -58,6 +59,12 @@ class ServeModel:
                 trained_val = exp_cfg.get(key)
                 if trained_val is not None and str(trained_val) != str(val):
                     logger.warning(f"Serving {key}={val} differs from training {key}={trained_val}")
+            
+            # Load per-class thresholds from meta if available
+            calib = meta.get("calibration", {})
+            if "per_class_thresholds" in calib:
+                self.per_class_thresholds = np.array(calib["per_class_thresholds"])
+                logger.info("Loaded per-class thresholds from meta.")
 
         self.model = ConflictNet(
             audio_encoder_name=self.cfg.audio_encoder,
@@ -92,6 +99,39 @@ class ServeModel:
         logger.info("Loading tokenizer (microsoft/deberta-v3-large)")
         self.tokenizer = AutoTokenizer.from_pretrained("microsoft/deberta-v3-large")
 
+    def build_faiss_index(self, embeddings: np.ndarray, labels: np.ndarray):
+        """Build FAISS index for retrieval-augmented detection."""
+        try:
+            import faiss
+            self.faiss_index = faiss.IndexFlatIP(embeddings.shape[1])
+            faiss.normalize_L2(embeddings)
+            self.faiss_index.add(embeddings)
+            self.faiss_labels = labels
+            logger.info(f"Built FAISS index with {len(embeddings)} samples.")
+        except ImportError:
+            logger.warning("FAISS not installed, skipping index building.")
+            self.faiss_index = None
+
+    def _get_tta_variants(self, waveform: torch.Tensor) -> List[torch.Tensor]:
+        """Generate test-time augmentation variants of the audio."""
+        variants = [waveform]
+        # Pitch shift up
+        try:
+            variants.append(AF.pitch_shift(waveform, self.SAMPLE_RATE, 2))
+        except Exception:
+            pass
+        # Pitch shift down
+        try:
+            variants.append(AF.pitch_shift(waveform, self.SAMPLE_RATE, -2))
+        except Exception:
+            pass
+        # Add noise
+        noise = torch.randn_like(waveform) * 0.005
+        variants.append(waveform + noise)
+        # Scale volume
+        variants.append(waveform * 0.8)
+        return variants[:5]
+
     @torch.no_grad()
     def predict(
         self,
@@ -99,61 +139,97 @@ class ServeModel:
         text: str,
         context_embeds: Optional[List[List[float]]] = None,
         prosody_z: Optional[List[float]] = None,
+        use_tta: bool = False,
+        use_retrieval: bool = False,
     ) -> Dict[str, Any]:
         assert self.model is not None and self.tokenizer is not None, "Model not loaded — call load()"
 
-        waveform = self._load_audio(audio_bytes)
+        base_waveform = self._load_audio(audio_bytes)
         input_ids, attn_mask = self._tokenize(text)
 
-        waveform = waveform.unsqueeze(0).to(self.device)
-        input_ids = input_ids.unsqueeze(0).to(self.device)
-        attn_mask = attn_mask.unsqueeze(0).to(self.device)
+        waveforms = self._get_tta_variants(base_waveform) if use_tta else [base_waveform]
+        
+        all_probs = []
+        all_severities = []
+        all_fused_embeds = []
 
-        ctx = None
-        ctx_pad = None
-        if context_embeds is not None:
-            ctx = torch.tensor(context_embeds, dtype=torch.float, device=self.device).unsqueeze(0)
-            ctx_pad = torch.zeros(1, ctx.size(1), dtype=torch.bool, device=self.device)
+        for waveform in waveforms:
+            waveform_t = waveform.unsqueeze(0).to(self.device)
+            input_ids_t = input_ids.unsqueeze(0).to(self.device)
+            attn_mask_t = attn_mask.unsqueeze(0).to(self.device)
 
-        pz = None
-        if prosody_z is not None:
-            pz = torch.tensor(prosody_z, dtype=torch.float, device=self.device).unsqueeze(0)
+            ctx = None
+            ctx_pad = None
+            if context_embeds is not None:
+                ctx = torch.tensor(context_embeds, dtype=torch.float, device=self.device).unsqueeze(0)
+                ctx_pad = torch.zeros(1, ctx.size(1), dtype=torch.bool, device=self.device)
 
-        use_amp = getattr(self.cfg, "amp", False) and self.device.type == "cuda"
-        with torch.autocast(device_type=self.device.type, enabled=use_amp):
-            output = self.model(
-                audio=waveform,
-                input_ids=input_ids,
-                attention_mask=attn_mask,
-                prosody_z=pz,
-                context_embeds=ctx,
-                context_padding=ctx_pad,
-            )
+            pz = None
+            if prosody_z is not None:
+                pz = torch.tensor(prosody_z, dtype=torch.float, device=self.device).unsqueeze(0)
 
-        probs = output.probs_type.squeeze(0).cpu().tolist()
-        conflict = bool(output.conflict_flag.squeeze(0).cpu().item())
-        severity = float(output.severity.squeeze(0).cpu().item()) if output.severity is not None else 0.0
+            use_amp = getattr(self.cfg, "amp", False) and self.device.type == "cuda"
+            with torch.autocast(device_type=self.device.type, enabled=use_amp):
+                output = self.model(
+                    audio=waveform_t,
+                    input_ids=input_ids_t,
+                    attention_mask=attn_mask_t,
+                    prosody_z=pz,
+                    context_embeds=ctx,
+                    context_padding=ctx_pad,
+                )
+
+            probs = output.probs_type.squeeze(0).cpu().numpy()
+            all_probs.append(probs)
+            
+            if output.severity is not None:
+                all_severities.append(output.severity.squeeze(0).cpu().item())
+                
+            all_fused_embeds.append(output.fused_embed.squeeze(0).cpu().numpy())
+
+        # Average over TTA variants
+        avg_probs = np.mean(all_probs, axis=0)
+        avg_severity = np.mean(all_severities) if all_severities else 0.0
+        avg_fused_embed = np.mean(all_fused_embeds, axis=0)
+        
+        # Retrieval augmentation
+        if use_retrieval and getattr(self, "faiss_index", None) is not None:
+            import faiss
+            query_emb = avg_fused_embed.reshape(1, -1).copy()
+            faiss.normalize_L2(query_emb)
+            distances, indices = self.faiss_index.search(query_emb, k=5)
+            # Soft pseudo-labels (average of top-K)
+            retrieved_labels = self.faiss_labels[indices[0]]
+            weights = np.exp(distances[0]) # simple weighting
+            weights = weights / np.sum(weights)
+            soft_labels = np.sum(retrieved_labels * weights[:, None], axis=0)
+            
+            # Augment original probabilities (e.g., 0.8 * original + 0.2 * retrieval)
+            avg_probs = 0.8 * avg_probs + 0.2 * soft_labels
 
         type_names = ["anger", "disgust", "fear", "happiness", "neutral", "sadness"]
-        pred_type = type_names[probs.index(max(probs))] if conflict else "none"
-
-        fused_embed_list = output.fused_embed.squeeze(0).cpu().tolist()
+        
+        # Get threshold if calibration is available (for simplicity we use 0.5 or max)
+        thresholds = getattr(self, "per_class_thresholds", np.ones(6) * 0.5)
+        
+        # Check if any probability exceeds its threshold
+        conflict = bool((avg_probs >= thresholds).any())
+        pred_type = type_names[np.argmax(avg_probs)] if conflict else "none"
 
         return {
             "conflict": conflict,
             "probs": {
-                "anger": probs[0],
-                "disgust": probs[1],
-                "fear": probs[2],
-                "happiness": probs[3],
-                "neutral": probs[4],
-                "sadness": probs[5],
+                "anger": float(avg_probs[0]),
+                "disgust": float(avg_probs[1]),
+                "fear": float(avg_probs[2]),
+                "happiness": float(avg_probs[3]),
+                "neutral": float(avg_probs[4]),
+                "sadness": float(avg_probs[5]),
             },
-            "severity": severity,
+            "severity": float(avg_severity),
             "predicted_type": pred_type,
-            "fused_embed": fused_embed_list,
+            "fused_embed": avg_fused_embed.tolist(),
         }
-
     @torch.no_grad()
     def predict_batch(
         self,

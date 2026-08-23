@@ -297,7 +297,8 @@ class Emotion2VecEncoder(nn.Module):
         self._backend = "funasr"
         if requested_backend == "fallback_wavlm":
             self._model = WavLMEncoder(freeze=freeze)
-            self.output_dim = self._model.output_dim
+            self.proj = nn.Linear(self._model.output_dim, embedding_dim) if self._model.output_dim != embedding_dim else nn.Identity()
+            self.output_dim = embedding_dim
             self._backend = "fallback_wavlm"
             logger.info("[Emotion2Vec] Using DDP-selected WavLM fallback")
             return
@@ -313,7 +314,8 @@ class Emotion2VecEncoder(nn.Module):
                 f"[Emotion2Vec] FunASR unavailable ({e}); using WavLM fallback"
             )
             self._model = WavLMEncoder(freeze=freeze)
-            self.output_dim = self._model.output_dim
+            self.proj = nn.Linear(self._model.output_dim, embedding_dim) if self._model.output_dim != embedding_dim else nn.Identity()
+            self.output_dim = embedding_dim
             self._backend = "fallback_wavlm"
 
     def _try_funasr(self):
@@ -343,7 +345,11 @@ class Emotion2VecEncoder(nn.Module):
             if return_frames:
                 return pooled, None
             return pooled
-        return self._model(audio, attention_mask=attention_mask, return_frames=return_frames)
+        out = self._model(audio, attention_mask=attention_mask, return_frames=return_frames)
+        if return_frames:
+            pooled, frames = out
+            return self.proj(pooled), frames
+        return self.proj(out)
 
     def _forward_funasr(self, audio):
         audio_np = audio.cpu().numpy()
@@ -372,12 +378,79 @@ class Emotion2VecEncoder(nn.Module):
         return next(self._model.parameters()).device
 
 
+class WhisperEncoder(nn.Module):
+    """Whisper audio encoder (openai/whisper-large-v3)."""
+
+    def __init__(self, model_name: str = "openai/whisper-large-v3", freeze: bool = True):
+        super().__init__()
+        self.output_dim = 1280
+        try:
+            from transformers import WhisperModel, WhisperFeatureExtractor
+            self._feature_extractor = WhisperFeatureExtractor.from_pretrained(model_name)
+            enc = WhisperModel.from_pretrained(model_name).encoder
+            if freeze:
+                for p in enc.parameters():
+                    p.requires_grad = False
+            self._encoder = enc
+            self.output_dim = enc.config.d_model
+            logger.info(f"Loaded Whisper: {model_name} (dim={self.output_dim})")
+        except Exception as e:
+            logger.warning(f"Whisper unavailable ({e}), using spectrogram fallback")
+            self._encoder = _SpectrogramEncoder(output_dim=self.output_dim)
+            self._feature_extractor = None
+
+    def forward(self, audio, attention_mask=None, return_frames=False):
+        if isinstance(self._encoder, _SpectrogramEncoder):
+            return self._encoder(audio, attention_mask, return_frames)
+        
+        device = audio.device
+        audio_np = audio.cpu().numpy()
+        features = self._feature_extractor(audio_np, sampling_rate=16000, return_tensors="pt").input_features
+        features = features.to(device)
+        
+        out = self._encoder(features)
+        hs = out.last_hidden_state.float()
+        
+        pooled = hs.mean(dim=1)
+        if return_frames:
+            return pooled, hs
+        return pooled
+
+
+class DualAudioEncoder(nn.Module):
+    """Dual Audio Encoder Fusion (Emotion2Vec + WavLM)."""
+
+    def __init__(self, freeze: bool = True, output_dim: int = 1024):
+        super().__init__()
+        self.emotion2vec = Emotion2VecEncoder(freeze=freeze)
+        self.wavlm = WavLMEncoder(freeze=freeze)
+        in_dim = self.emotion2vec.output_dim + self.wavlm.output_dim
+        self.output_dim = output_dim
+        self.proj = nn.Linear(in_dim, output_dim)
+
+    def forward(self, audio, attention_mask=None, return_frames=False):
+        out1 = self.emotion2vec(audio, attention_mask, return_frames=return_frames)
+        out2 = self.wavlm(audio, attention_mask, return_frames=return_frames)
+        
+        if return_frames:
+            pool1, frame1 = out1
+            pool2, frame2 = out2
+            pool = torch.cat([pool1, pool2], dim=-1)
+            pool = self.proj(pool)
+            return pool, None
+        
+        pool = torch.cat([out1, out2], dim=-1)
+        return self.proj(pool)
+
+
 def build_audio_encoder(name: str = "emotion2vec", **kwargs) -> nn.Module:
     encoders = {
         "wav2vec2": Wav2Vec2Encoder,
         "wavlm": WavLMEncoder,
         "wavlm_weighted": WavLMWeightedEncoder,
         "emotion2vec": Emotion2VecEncoder,
+        "whisper": WhisperEncoder,
+        "dual": DualAudioEncoder,
     }
     if name not in encoders:
         raise ValueError(f"Unknown audio encoder: {name}. Choose from {list(encoders.keys())}")

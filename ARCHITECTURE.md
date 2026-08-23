@@ -38,7 +38,9 @@ that processes **audio** (16 kHz waveform) and **text** (transcript sentence) th
 encoding streams, aligns them in a shared 256-dimensional embedding space via **cross-modal
 attention**, fuses them with **speaker-normalised** features through a gated MLP, contextualises
 the fused representation across **dialogue history**, and finally predicts three conflict subtypes
-plus a continuous severity score.
+plus a continuous severity score across unified multi-dataset streams (**IEMOCAP**, **MUStARD++**, **CREMA-D**, **MELD**).
+
+> 💡 **Roadmap to 98% Accuracy & Macro-F1:** For P0 data-integrity fixes and Priority 1–11 architecture upgrades (Token-level Cross-Modal Attention, Dual Audio Encoders, Knowledge Distillation from Audio-LLM, Soft CTC Alignment), see [`FUTURE_UPGRADES.md`](file:///c:\Users\Nithi\Documents\Github\ConflictNet-main\FUTURE_UPGRADES.md).
 
 **Core innovations (⭐ novel):**
 
@@ -51,7 +53,7 @@ plus a continuous severity score.
 | 5 | **Word-level audio-text divergence** — MFA forced alignment → per-word cosine divergence → 8-dim aggregate feature | ⭐ Primary | ~155 |
 | 6 | **Self-supervised swap objective** — detect mispaired audio↔text pairs for pre-training without labels | ⭐ Primary | ~50 |
 | 7 | **Causal temporal context module** — learned positional encoding + speaker role embedding + causal Transformer | ⭐ Primary | ~130 |
-| 8 | **Multi-task uncertainty loss** — Kendall 2018 uncertainty weighting (learned log σ² per task) | Implementation | ~30 |
+| 8 | **Multi-task uncertainty loss & Focal BCE** — Kendall 2018 uncertainty weighting + Focal BCE ($\gamma=2.0$) for hard minority conflict cases | ⭐ Primary | ~60 |
 | 9 | **Curriculum sampler** — difficulty-based progressive sampling | Semi-novel | ~60 |
 
 ---
@@ -718,13 +720,24 @@ conflict_sep_loss = ReLU(paired_sim[conflict] + margin).mean()  # margin=0.5
 L_contrastive = L_InfoNCE(audio, text) + L_sep(conflict_pairs)
 ```
 
-### 11.2 Multi-Label BCE Loss
+### 11.2 Multi-Label Focal BCE Loss ⭐ (`models/conflictnet.py:34–50`)
+
+To address severe class imbalance across conflict emotion slots (anger, disgust, fear = indices 0,1,2), ConflictNet v2 uses a **Focal Binary Cross-Entropy Loss**:
+
+$$\text{FL}(p_t) = -\alpha_t (1 - p_t)^\gamma \log(p_t)$$
 
 ```python
-L_type = Σ_i BCE(σ(logits_i), y_i) for i ∈ {sarcasm, suppression, deception}
+def focal_bce_loss(logits, targets, alpha=0.75, gamma=2.0, pos_weight=None):
+    bce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+    probs = torch.sigmoid(logits)
+    pt = torch.where(targets > 0.5, probs, 1 - probs)
+    focal_weight = (1 - pt) ** gamma
+    alpha_weight = torch.where(targets > 0.5, alpha, 1 - alpha)
+    return (alpha_weight * focal_weight * bce).mean()
 ```
 
-Independent binary cross-entropy per type (not softmax — utterances can be both sarcastic and deceptive simultaneously).
+- Down-weights easy negative examples ($\gamma=2.0$), forcing gradients to focus on hard, ambiguous conflict examples.
+- Applied uniformly across all dataset streams (IEMOCAP, MUStARD++, CREMA-D, MELD) with label smoothing ($\epsilon=0.05$).
 
 ### 11.3 Severity MSE Loss
 
@@ -822,16 +835,26 @@ class CurriculumSampler(Sampler):
         return min(0.33 + 0.67 × progress, 1.0)
 ```
 
-### 12.5 Training Flow
+### 12.5 Distributed Data Parallel (DDP) & Multi-GPU Stability
+
+ConflictNet v2 features production-grade DDP scaling optimized for multi-GPU hardware (e.g. Dual NVIDIA T4s):
+
+* **Unwrapped Model Evaluation:** `evaluate()` calls `_model_for_eval = getattr(self.model, "module", self.model)`. Running inference through the unwrapped `nn.Module` eliminates internal DDP buffer synchronization collectives on Rank 0 during validation while non-zero ranks block at the metric broadcast—preventing 300s NCCL watchdog timeouts.
+* **Epoch-Boundary Barriers:** Explicit `torch.distributed.barrier()` calls before `evaluate()` and after checkpoint saving ensure all GPUs transition between training and validation synchronously.
+* **Exact Gradient Accumulation Sync:** Guarantees gradient synchronization on the final batch of every epoch (`(n_batches + 1) == total_batches`), preventing model weights on Rank 0 and Rank 1 from diverging when dataset batch counts are indivisible by `gradient_accumulation_steps`.
+* **Rank-Zero First Cache Warming:** Rank 0 acquires single-process locks to download HuggingFace and SpeechBrain models before non-zero ranks build from warm local caches—preventing multi-worker download race conditions.
+* **Automatic Mixed Precision (`--amp`):** FP16 mixed precision leverages Turing Tensor Cores, cutting VRAM usage by 50% and boosting throughput by 2.5x.
+
+### 12.6 Training Flow
 
 ```
 for epoch in range(n_epochs):
     if epoch < pretrain_epochs:
-        phase = "pre-training"     # swap objective only, no labels
+        phase = "pre-training"     # swap objective + InfoNCE, no classification loss
     else:
-        phase = "fine-tuning"      # all tasks
+        phase = "fine-tuning"      # all multi-task losses active
 
-    # Training
+    # Training Loop
     curriculum_sampler.set_epoch(epoch)       # update difficulty threshold
     for batch in train_loader:
         context_embeds = ctx_cache.get(context_ids)   # fetch dialogue history

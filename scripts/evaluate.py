@@ -87,9 +87,14 @@ def main():
     prosody_lookup = None
     if args.prosody_stats:
         prosody_path = Path(args.prosody_stats)
-        zscores_p = prosody_path.parent / f"{prosody_path.stem}.zscores.json"
+        zscores_p = prosody_path.parent / f"{prosody_path.stem}.train_only.json"
         if not zscores_p.exists():
-            zscores_p = prosody_path.with_suffix(".zscores.json")
+            zscores_p = prosody_path.with_suffix(".train_only.json")
+        if not zscores_p.exists():
+            # Fallback to older .zscores.json format if train_only is unavailable
+            zscores_p = prosody_path.parent / f"{prosody_path.stem}.zscores.json"
+            if not zscores_p.exists():
+                zscores_p = prosody_path.with_suffix(".zscores.json")
         if zscores_p.exists():
             try:
                 with open(zscores_p) as f:
@@ -140,6 +145,7 @@ def main():
 
     # --- Run inference ---
     all_probs, all_labels, all_genders = [], [], []
+    all_ages, all_dialects, all_intensities = [], [], []
     all_severity_pred, all_severity_true = [], []
     sample_audio = []
 
@@ -162,7 +168,13 @@ def main():
             if out.severity is not None:
                 all_severity_pred.append(out.severity.squeeze(-1).cpu().numpy())
                 all_severity_true.append(batch["severity"].squeeze(-1).numpy())
-            all_genders.extend(batch.get("genders", [None] * batch["audio"].size(0)))
+            
+            bsz = batch["audio"].size(0)
+            all_genders.extend(batch.get("genders", [None] * bsz))
+            all_ages.extend(batch.get("ages", [None] * bsz))
+            all_dialects.extend(batch.get("dialects", [None] * bsz))
+            all_intensities.extend(batch.get("emotion_intensities", [None] * bsz))
+            
             # Store a few audio samples for attribution
             if len(sample_audio) < 4:
                 sample_audio.append(batch_gpu["audio"][:1])
@@ -188,11 +200,17 @@ def main():
     # --- Fairness audit ---
     if args.fairness:
         from evaluation.fairness import fairness_audit
-        valid_genders = [g if g in ("M", "F") else "unknown" for g in all_genders]
+        sensitive_dict = {
+            "gender": [g if g in ("M", "F") else "unknown" for g in all_genders],
+            "age": [str(a) if a is not None else "unknown" for a in all_ages],
+            "dialect": [str(d) if d is not None else "unknown" for d in all_dialects],
+            "emotion_intensity": [str(i) if i is not None else "unknown" for i in all_intensities],
+        }
         binary_pred = (all_probs >= 0.5).any(axis=1).astype(int)
         binary_true = all_labels.any(axis=1).astype(int)
-        fairness_report = fairness_audit(binary_pred, binary_true, valid_genders)
-        logger.info(f"[Fairness] Disparity={fairness_report['disparity']:.4f}")
+        fairness_report = fairness_audit(binary_pred, binary_true, sensitive_dict)
+        if "gender" in fairness_report:
+            logger.info(f"[Fairness] Gender Disparity={fairness_report['gender']['disparity']:.4f}")
         with open(out_dir / "fairness.json", "w") as f:
             json.dump(fairness_report, f, indent=2)
 
@@ -202,7 +220,8 @@ def main():
         attr = ConflictNetAttribution(model, n_steps=50)
         sample = sample_audio[0]
         try:
-            tokenizer = model.text_encoder.tokenizer
+            from transformers import AutoTokenizer
+            tokenizer = AutoTokenizer.from_pretrained("microsoft/deberta-v3-large")
             sample_batch = eval_loader.dataset[0]
             input_ids = sample_batch["input_ids"].unsqueeze(0).to(args.device)
             attention_mask = sample_batch["attention_mask"].unsqueeze(0).to(args.device)
