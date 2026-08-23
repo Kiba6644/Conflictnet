@@ -29,6 +29,10 @@ os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 os.environ["MS_DISABLE_PROGRESS_BAR"] = "1"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
+# Fix for Kaggle dual-T4 NCCL deadlocks during DDP broadcast
+os.environ["NCCL_P2P_DISABLE"] = "1"
+os.environ["NCCL_IB_DISABLE"] = "1"
+
 import torch
 from torch.utils.data import DataLoader, ConcatDataset
 
