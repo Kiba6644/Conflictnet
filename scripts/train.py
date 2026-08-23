@@ -148,7 +148,6 @@ def main():
         os.environ["NCCL_IB_DISABLE"] = "1"
         
         torch.cuda.set_device(local_rank)
-        torch.distributed.init_process_group(backend="nccl")
         args.device = f"cuda:{local_rank}"
 
     torch.manual_seed(args.seed)
@@ -174,15 +173,21 @@ def main():
             label_smoothing=args.label_smoothing,
         )
 
-    is_ddp = local_rank != -1 and torch.distributed.is_initialized()
+    is_ddp_run = local_rank != -1
     prewarmed_model = None
-    if is_ddp:
+    
+    if is_ddp_run:
         # Hugging Face and SpeechBrain use disk caches, but they are not a
         # transaction across all of the files a model needs.  In particular,
         # letting every rank build a dataset first can race on the tokenizer
         # before the old, model-only barrier below is reached.  Build every
         # pretrained component once on rank zero before *any* dataset or model
         # constructor runs in another worker.
+        
+        # IMPORTANT: We MUST do this BEFORE init_process_group!
+        # If DDP is initialized, SpeechBrain's `from_hparams` will internally execute 
+        # DDP barriers. Because we wrap this in `if local_rank == 0`, Rank 1 would 
+        # skip those barriers, permanently desynchronizing the NCCL queue.
         if local_rank == 0:
             logger.info("[DDP] Rank 0 pre-warming pretrained model and tokenizer caches...")
             rng_state = torch.get_rng_state()
@@ -212,6 +217,10 @@ def main():
                     torch.cuda.set_rng_state_all(cuda_rng_states)
             torch.set_rng_state(rng_state)
             logger.info("[DDP] Pre-warm complete — releasing the remaining ranks.")
+            
+        # Now that we've safely pre-warmed everything on Rank 0 without 
+        # SpeechBrain messing up the DDP queue, we can safely initialize DDP!
+        torch.distributed.init_process_group(backend="nccl")
             
         if local_rank == 0:
             logger.info("[DDP] Rank 0 waiting at first barrier...")
