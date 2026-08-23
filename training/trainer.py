@@ -287,10 +287,18 @@ class ConflictNetTrainer:
 
             loss = loss / grad_accum_steps
 
-            if self.use_amp and self.grad_scaler is not None:
-                self.grad_scaler.scale(loss).backward()
-            else:
-                loss.backward()
+            is_sync_step = (n_batches + 1) % grad_accum_steps == 0
+            
+            # Use no_sync() if accumulating gradients in DDP to avoid premature all_reduce syncs
+            import contextlib
+            from torch.nn.parallel import DistributedDataParallel as DDP
+            sync_context = self.model.no_sync() if not is_sync_step and isinstance(self.model, DDP) else contextlib.nullcontext()
+
+            with sync_context:
+                if self.use_amp and self.grad_scaler is not None:
+                    self.grad_scaler.scale(loss).backward()
+                else:
+                    loss.backward()
 
             if (n_batches + 1) % grad_accum_steps == 0:
                 if self.use_amp and self.grad_scaler is not None:
@@ -440,9 +448,13 @@ class ConflictNetTrainer:
             # val/f1_weighted drives best-checkpoint and early-stopping logic
             "val/f1_weighted": float(f1_binary),
         }
+        is_ddp = torch.distributed.is_initialized() and int(os.environ.get("LOCAL_RANK", -1)) != -1
         if is_ddp:
+            metric_keys = sorted(list(metrics.keys()))
             metric_values = torch.tensor([metrics[key] for key in metric_keys], device=self.device)
             torch.distributed.broadcast(metric_values, src=0)
+            if int(os.environ.get("LOCAL_RANK", -1)) != 0:
+                metrics = {k: v.item() for k, v in zip(metric_keys, metric_values)}
         return metrics
 
     def train(
