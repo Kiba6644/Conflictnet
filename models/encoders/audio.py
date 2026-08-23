@@ -263,6 +263,11 @@ class Emotion2VecEncoder(nn.Module):
         embedding_dim: int = 1024,
     ):
         super().__init__()
+        local_path = os.environ.get("CONFLICTNET_EMOTION2VEC_PATH")
+        if local_path:
+            model_name = local_path
+            logger.info(f"[Emotion2Vec] Using local path: {local_path}")
+            
         self.model_name = model_name
         self._freeze = freeze
         self.output_dim = embedding_dim
