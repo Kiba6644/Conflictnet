@@ -416,7 +416,7 @@ def main():
     # The cache was warmed before dataset construction.  Keep this second
     # rank-zero-first construction as a safeguard for non-cache state such as
     # SpeechBrain's local savedir.
-    if is_ddp:
+    if is_ddp_run:
         if local_rank == 0:
             logger.info("[DDP] Rank 0 building model and warming HF/SpeechBrain cache...")
             model = prewarmed_model if prewarmed_model is not None else _build_model()
