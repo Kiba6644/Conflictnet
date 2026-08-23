@@ -369,8 +369,7 @@ def main():
 
     # Dynamically determine num_workers to speed up data loading per GPU process
     # On Kaggle, /dev/shm limits cause silent deadlocks with persistent_workers.
-    # Set to 0 to run in the main thread and ensure stability.
-    optimal_workers = 0
+    optimal_workers = 0 if "KAGGLE_KERNEL_RUN_TYPE" in os.environ else min(4, os.cpu_count() or 1)
     
     from torch.utils.data.distributed import DistributedSampler
     train_sampler = DistributedSampler(train_set) if local_rank != -1 else None

@@ -34,14 +34,18 @@ logger = logging.getLogger(__name__)
 def focal_bce_loss(logits, targets, alpha=0.75, gamma=2.0, pos_weight=None):
     """Focal loss: down-weights easy negatives, focuses on hard sarcasm cases."""
     bce = F.binary_cross_entropy_with_logits(
-        logits, targets, pos_weight=pos_weight, reduction="none"
+        logits, targets, reduction="none"
     )
     probs = torch.sigmoid(logits)
     pt = torch.where(targets > 0.5, probs, 1 - probs)   # p_t
     focal_weight = (1 - pt) ** gamma
-    alpha_weight = torch.where(targets > 0.5,
-                               torch.full_like(targets, alpha),
-                               torch.full_like(targets, 1 - alpha))
+    
+    if pos_weight is not None:
+        alpha_weight = torch.where(targets > 0.5, pos_weight, torch.ones_like(targets))
+    else:
+        alpha_weight = torch.where(targets > 0.5,
+                                   torch.full_like(targets, alpha),
+                                   torch.full_like(targets, 1 - alpha))
     return (alpha_weight * focal_weight * bce).mean()
 
 # ---------------------------------------------------------------------------
@@ -121,19 +125,26 @@ class SwapPretrainingObjective(nn.Module):
         # Shift by 1 to ensure a derangement (no self-swapping)
         perm = (torch.arange(B, device=device) + 1) % B
 
-        # Randomly choose audio-swap (left) or text-swap (right) for each item
-        use_audio_swap = torch.rand(B, device=device) < 0.5
-        pair_feats = []
+        # SPEED FIX: replaced Python loop with vectorized torch.where ops.
+        # Old loop built pair_feats item-by-item (O(B) Python overhead).
+        # Randomly choose audio-swap or text-swap for swapped positions.
+        use_audio_swap = (torch.rand(B, device=device) < 0.5) & swap_mask
+        use_text_swap  = (~use_audio_swap) & swap_mask
 
-        for i in range(B):
-            if not swap_mask[i]:
-                pair_feats.append(torch.cat([audio_embeds[i], text_embeds[i]], dim=0))
-            elif use_audio_swap[i]:
-                pair_feats.append(torch.cat([audio_embeds[perm[i]], text_embeds[i]], dim=0))
-            else:
-                pair_feats.append(torch.cat([audio_embeds[i], text_embeds[perm[i]]], dim=0))
+        # Build audio side: swap with perm[i] where use_audio_swap, else keep original
+        audio_side = torch.where(
+            use_audio_swap.unsqueeze(-1).expand_as(audio_embeds),
+            audio_embeds[perm],
+            audio_embeds,
+        )
+        # Build text side: swap with perm[i] where use_text_swap, else keep original
+        text_side = torch.where(
+            use_text_swap.unsqueeze(-1).expand_as(text_embeds),
+            text_embeds[perm],
+            text_embeds,
+        )
 
-        pair_feat = torch.stack(pair_feats)
+        pair_feat = torch.cat([audio_side, text_side], dim=-1)
         logits = self.swap_classifier(pair_feat).squeeze(-1)
         return F.binary_cross_entropy_with_logits(logits, swap_labels)
 
@@ -160,6 +171,9 @@ class MultiTaskLoss(nn.Module):
         total = torch.tensor(0.0, device=self.log_vars.device)
         weights = {}
         for i, loss in enumerate(losses):
+            if loss.item() == 0.0:
+                weights[f"sigma_task_{i}"] = torch.exp(self.log_vars[i] * 0.5).item()
+                continue
             precision = torch.exp(-self.log_vars[i])
             total = total + precision * loss + 0.5 * self.log_vars[i]
             weights[f"sigma_task_{i}"] = torch.exp(self.log_vars[i] * 0.5).item()
@@ -204,7 +218,7 @@ class ConflictNet(nn.Module):
         use_baseline_subtract: bool = True,
         lora_r: int = 16,
         lora_alpha: int = 32,
-        label_smoothing: float = 0.01,
+        label_smoothing: float = 0.05,  # aligned with CLI --label_smoothing default
         sarcasm_pos_weight: float = 8.0,
     ):
         super().__init__()
@@ -524,7 +538,11 @@ class ConflictNet(nn.Module):
                     smooth_labels,
                     alpha=0.75,
                     gamma=2.0,
-                    pos_weight=self.pos_weight.to(audio.device),
+                    # self.pos_weight is already a registered buffer — PyTorch
+                    # moves it to the model device automatically via .to(device).
+                    # Calling .to(audio.device) inside forward() created a
+                    # temporary tensor every step (minor but wasteful).
+                    pos_weight=self.pos_weight,
                 )
                 losses.append(type_loss)
             else:

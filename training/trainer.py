@@ -158,17 +158,32 @@ class ConflictNetTrainer:
         if hasattr(torch.optim.AdamW, "__init__") and "fused" in AdamW.__init__.__code__.co_varnames:
             kwargs["fused"] = True
 
+        # Standard practice: do NOT apply weight decay to bias terms and
+        # LayerNorm parameters — this follows the BERT/DeBERTa fine-tuning
+        # recipe and typically yields slightly better accuracy.
+        no_decay = {"bias", "layer_norm.weight", "layernorm.weight", "LayerNorm.weight"}
+
         # Encoder params (LoRA adapters in DeBERTa)
-        encoder_params = [p for n, p in self.model.named_parameters()
-                          if p.requires_grad and "text_encoder" in n]
+        encoder_params_wd  = [p for n, p in self.model.named_parameters()
+                               if p.requires_grad and "text_encoder" in n
+                               and not any(nd in n for nd in no_decay)]
+        encoder_params_nwd = [p for n, p in self.model.named_parameters()
+                               if p.requires_grad and "text_encoder" in n
+                               and any(nd in n for nd in no_decay)]
         # Newly-initialized heads (projection, fusion, temporal, classifier)
-        head_params = [p for n, p in self.model.named_parameters()
-                       if p.requires_grad and "text_encoder" not in n]
+        head_params_wd  = [p for n, p in self.model.named_parameters()
+                            if p.requires_grad and "text_encoder" not in n
+                            and not any(nd in n for nd in no_decay)]
+        head_params_nwd = [p for n, p in self.model.named_parameters()
+                            if p.requires_grad and "text_encoder" not in n
+                            and any(nd in n for nd in no_decay)]
 
         self.optimizer = AdamW([
-            {"params": encoder_params, "lr": lr,       "name": "encoder"},
-            {"params": head_params,    "lr": lr * 10,  "name": "heads"},
-        ], weight_decay=0.01, **kwargs)
+            {"params": encoder_params_wd,  "lr": lr,       "weight_decay": 0.01, "name": "encoder"},
+            {"params": encoder_params_nwd, "lr": lr,       "weight_decay": 0.0,  "name": "encoder_nwd"},
+            {"params": head_params_wd,     "lr": lr * 10,  "weight_decay": 0.01, "name": "heads"},
+            {"params": head_params_nwd,    "lr": lr * 10,  "weight_decay": 0.0,  "name": "heads_nwd"},
+        ], **kwargs)
         grad_accum_steps = int(self.cfg.get("gradient_accumulation_steps", 1))
         steps_per_epoch = max(1, len(self.train_loader) // grad_accum_steps)
         epochs = int(self.cfg.get("epochs") or 50)
@@ -340,6 +355,10 @@ class ConflictNetTrainer:
             else:
                 self.optimizer.step()
             self.scheduler.step()
+            # BUG FIX: zero_grad() was missing here. Without it, stale gradients
+            # from the end of this epoch survive into the first batch of the next
+            # epoch and get double-accumulated, corrupting the first update.
+            self.optimizer.zero_grad()
             self.global_step += 1
 
         return {"loss": total_loss / max(n_batches, 1)}
@@ -390,9 +409,14 @@ class ConflictNetTrainer:
             if isinstance(turn_indices, torch.Tensor):
                 turn_indices = turn_indices.cpu().tolist()
             str_conv_ids = [str(x) for x in conv_ids] if conv_ids else []
+            # Use .module to get the true embed_dim when wrapped by DDP/DataParallel.
+            # Calling getattr on the wrapper returns the default (256) instead of
+            # the actual value, causing a shape mismatch crash.
+            _model_inner = getattr(self.model, "module", self.model)
+            _embed_dim = getattr(_model_inner, "embed_dim", 256)
             ctx_embeds, ctx_padding, _ = self.ctx_cache.get_batch_context(
                 str_conv_ids,
-                embed_dim=getattr(self.model, "embed_dim", 256),
+                embed_dim=_embed_dim,
                 turn_indices=turn_indices,
             ) if str_conv_ids else (None, None, [])
             with torch.autocast(device_type=self._autocast_device_type, enabled=self.use_amp):
@@ -441,12 +465,22 @@ class ConflictNetTrainer:
                     pass
         macro_ap = float(np.mean(per_class_ap)) if per_class_ap else 0.0
 
+        # Weighted (macro) F1 over all classes — used for best-checkpoint
+        # and early-stopping.  Using binary_f1 here was incorrect: it
+        # collapsed the multi-class signal to a single conflict/non-conflict
+        # decision and ignored per-emotion class performance.
+        from sklearn.metrics import f1_score as _f1
+        f1_macro = _f1(labels, (probs >= 0.5).astype(int), average="macro", zero_division=0)
+
         metrics = {
             "val/f1_binary": float(f1_binary),
             "val/auc_binary": float(auc_binary),
             "val/macro_ap": float(macro_ap),
-            # val/f1_weighted drives best-checkpoint and early-stopping logic
-            "val/f1_weighted": float(f1_binary),
+            "val/f1_macro": float(f1_macro),
+            # val/f1_weighted drives best-checkpoint and early-stopping logic.
+            # BUG FIX: was incorrectly set to f1_binary (binary conflict F1)
+            # which ignores per-emotion class accuracy. Now uses macro F1.
+            "val/f1_weighted": float(f1_macro),
         }
         is_ddp = torch.distributed.is_initialized() and int(os.environ.get("LOCAL_RANK", -1)) != -1
         if is_ddp:

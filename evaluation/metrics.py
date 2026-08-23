@@ -99,7 +99,7 @@ def compute_all_metrics(
     from sklearn.utils.class_weight import compute_sample_weight  # type: ignore
     try:
         sample_weights = compute_sample_weight("balanced", conflict_true)
-        metrics["wacc"] = float(np.average(conflict_pred == conflict_true, weights=sample_weights))
+        metrics["wacc"] = float(accuracy_score(conflict_true, conflict_pred, sample_weight=sample_weights))
     except Exception:
         metrics["wacc"] = float(accuracy_score(conflict_true, conflict_pred))
 
