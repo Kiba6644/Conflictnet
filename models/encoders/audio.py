@@ -111,6 +111,12 @@ class WavLMEncoder(nn.Module):
         # made a rank that missed the cached checkpoint construct a different
         # projection head from a rank that loaded it successfully.
         self.output_dim = 1024
+        requested_backend = os.environ.get("CONFLICTNET_WAVLM_BACKEND", "auto")
+        if requested_backend == "spectrogram":
+            self._encoder = _SpectrogramEncoder(output_dim=self.output_dim)
+            self._backend = "spectrogram"
+            logger.info("[WavLM] Using DDP-selected spectrogram fallback")
+            return
         try:
             from transformers import WavLMModel
             enc = WavLMModel.from_pretrained(model_name)
@@ -123,10 +129,17 @@ class WavLMEncoder(nn.Module):
                 logger.info("[WavLM] Gradient checkpointing enabled")
             self._encoder = enc
             self.output_dim = enc.config.hidden_size
+            self._backend = "pretrained"
             logger.info(f"Loaded WavLM: {model_name} (dim={self.output_dim})")
         except Exception as e:
+            if requested_backend == "pretrained":
+                raise RuntimeError(
+                    "Rank 0 selected the pretrained WavLM backend, but this rank "
+                    f"could not load it: {e}"
+                ) from e
             logger.warning(f"WavLM unavailable ({e}), using spectrogram fallback")
             self._encoder = _SpectrogramEncoder(output_dim=self.output_dim)
+            self._backend = "spectrogram"
 
     def _masked_pool(self, hs: torch.Tensor, attention_mask=None) -> torch.Tensor:
         if attention_mask is not None:
@@ -273,10 +286,22 @@ class Emotion2VecEncoder(nn.Module):
         self.output_dim = embedding_dim
         self._model = None
         self._funasr_wrapper = []
+        requested_backend = os.environ.get("CONFLICTNET_EMOTION2VEC_BACKEND", "auto")
         self._backend = "funasr"
+        if requested_backend == "fallback_wavlm":
+            self._model = WavLMEncoder(freeze=freeze)
+            self.output_dim = self._model.output_dim
+            self._backend = "fallback_wavlm"
+            logger.info("[Emotion2Vec] Using DDP-selected WavLM fallback")
+            return
         try:
             self._try_funasr()
         except Exception as e:
+            if requested_backend == "funasr":
+                raise RuntimeError(
+                    "Rank 0 selected the FunASR Emotion2Vec backend, but this rank "
+                    f"could not load it: {e}"
+                ) from e
             logger.warning(
                 f"[Emotion2Vec] FunASR unavailable ({e}); using WavLM fallback"
             )

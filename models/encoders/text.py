@@ -42,6 +42,14 @@ class DeBERTaEncoder(nn.Module):
         self._lora_alpha = lora_alpha
         self.encoder = None
         self.tokenizer = None
+        requested_backend = os.environ.get("CONFLICTNET_TEXT_BACKEND", "auto")
+
+        if requested_backend == "fallback":
+            self.encoder = _TextFallbackEncoder(vocab_size, embed_dim)
+            self.tokenizer = None
+            self._backend = "fallback"
+            logger.info("[DeBERTa] Using DDP-selected fallback text encoder")
+            return
 
         try:
             from transformers import AutoModel, AutoTokenizer
@@ -57,16 +65,30 @@ class DeBERTaEncoder(nn.Module):
                 logger.info("[DeBERTa] Gradient checkpointing enabled")
             if use_lora:
                 self._apply_lora(lora_r, lora_alpha)
+            self._backend = "pretrained"
             return
         except Exception as e:
+            if requested_backend == "pretrained":
+                raise RuntimeError(
+                    "Rank 0 selected the pretrained DeBERTa backend, but this rank "
+                    f"could not load it: {e}"
+                ) from e
             logger.warning(
                 f"DeBERTa model {model_name} unavailable ({e}), using fallback text encoder"
             )
 
         self.encoder = _TextFallbackEncoder(vocab_size, embed_dim)
         self.tokenizer = None  # tokenizer provided externally
+        self._backend = "fallback"
 
     def _apply_lora(self, r: int, alpha: int):
+        requested_lora_backend = os.environ.get("CONFLICTNET_LORA_BACKEND", "auto")
+        if requested_lora_backend == "frozen":
+            for p in self.encoder.parameters():
+                p.requires_grad = False
+            self._lora_backend = "frozen"
+            logger.info("[LoRA] Using DDP-selected frozen DeBERTa backend")
+            return
         try:
             from peft import LoraConfig, TaskType, get_peft_model
             config = LoraConfig(
@@ -81,13 +103,20 @@ class DeBERTaEncoder(nn.Module):
             trainable = sum(p.numel() for p in self.encoder.parameters() if p.requires_grad)
             total = sum(p.numel() for p in self.encoder.parameters())
             logger.info(f"[LoRA] Trainable: {trainable:,} / {total:,} ({100*trainable/total:.2f}%)")
+            self._lora_backend = "peft"
         except Exception as e:
+            if requested_lora_backend == "peft":
+                raise RuntimeError(
+                    "Rank 0 selected PEFT/LoRA, but this rank could not initialise it: "
+                    f"{e}"
+                ) from e
             logger.warning(
                 f"[WARN] peft unavailable or incompatible ({e}). "
                 f"Ensure peft==0.14.0 is installed in your setup script. Freezing DeBERTa parameters."
             )
             for p in self.encoder.parameters():
                 p.requires_grad = False
+            self._lora_backend = "frozen"
 
     def forward(
         self,

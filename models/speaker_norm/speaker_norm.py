@@ -391,6 +391,16 @@ class SpeakerNormalizer(nn.Module):
         model = self._get_spk_model()
         if isinstance(model, str) or model is None:
             return torch.zeros(audio.size(0), self._spk_embed_dim, device=audio.device)
+        # ECAPA is intentionally not registered as a child module (to keep DDP
+        # from synchronising its frozen weights), so ``ConflictNet.to(...)``
+        # does not move it. Move it lazily on first use to match the batch.
+        try:
+            model_device = next(model.parameters()).device
+            if model_device != audio.device:
+                model.to(audio.device)
+        except (AttributeError, StopIteration):
+            logger.warning("[SpeakerNorm] Could not determine ECAPA device; disabling speaker embedding")
+            return torch.zeros(audio.size(0), self._spk_embed_dim, device=audio.device)
         embeddings = model.encode_batch(audio)  # (B, 1, 192)
         return embeddings.squeeze(1)            # (B, 192)
 

@@ -17,7 +17,7 @@ Usage in trainer::
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import torch
 
@@ -37,9 +37,12 @@ class ContextCache:
     def __init__(self, max_turns: int = 8, device: str = "cpu"):
         self.max_turns = max_turns
         self.device = device
-        self._cache: Dict[str, torch.Tensor] = {}
+        # Store an optional turn index with every embedding.  Training batches
+        # are shuffled, so append order alone can otherwise leak future dialogue
+        # turns into the current sample's context.
+        self._cache: Dict[str, List[Tuple[Optional[int], torch.Tensor]]] = {}
 
-    def get_context(self, conv_id: str) -> Optional[torch.Tensor]:
+    def get_context(self, conv_id: str, before_turn: Optional[int] = None) -> Optional[torch.Tensor]:
         """Get context history for a conversation.
 
         Returns:
@@ -48,14 +51,23 @@ class ContextCache:
         """
         if conv_id not in self._cache:
             return None
-        ctx = self._cache[conv_id]
-        if ctx.size(0) > self.max_turns:
-            ctx = ctx[-self.max_turns:]
-            self._cache[conv_id] = ctx
-        return ctx
+        history = self._cache[conv_id]
+        if before_turn is not None:
+            # Indexed turns are only valid if strictly earlier. Unindexed
+            # histories are retained for datasets that do not expose turns.
+            history = [(turn, embed) for turn, embed in history if turn is None or turn < before_turn]
+        if not history:
+            return None
+        if all(turn is not None for turn, _ in history):
+            history = sorted(history, key=lambda item: item[0])
+        history = history[-self.max_turns:]
+        return torch.cat([embed for _, embed in history], dim=0)
 
     def get_batch_context(
-        self, conv_ids: List[str], embed_dim: int = 256
+        self,
+        conv_ids: List[str],
+        embed_dim: int = 256,
+        turn_indices: Optional[List[int]] = None,
     ) -> tuple[torch.Tensor, torch.Tensor, List[str]]:
         """Get padded context for a batch of conversations.
 
@@ -66,9 +78,10 @@ class ContextCache:
             - ``context_conversations: (B,)`` same conv_ids.
         """
         B = len(conv_ids)
-        contexts: List[Optional[torch.Tensor]] = [
-            self.get_context(cid) for cid in conv_ids
-        ]
+        contexts: List[Optional[torch.Tensor]] = []
+        for i, conv_id in enumerate(conv_ids):
+            current_turn = turn_indices[i] if turn_indices is not None else None
+            contexts.append(self.get_context(conv_id, before_turn=current_turn))
         max_len = max(
             (ctx.size(0) for ctx in contexts if ctx is not None), default=0
         )
@@ -90,7 +103,7 @@ class ContextCache:
 
         return embeds, padding, conv_ids
 
-    def update(self, conv_id: str, turn_embed: torch.Tensor):
+    def update(self, conv_id: str, turn_embed: torch.Tensor, turn_index: Optional[int] = None):
         """Append a single turn embedding to conversation history.
 
         Args:
@@ -100,12 +113,16 @@ class ContextCache:
         fe = turn_embed.detach()
         if fe.dim() == 1:
             fe = fe.unsqueeze(0)
-        if conv_id in self._cache:
-            self._cache[conv_id] = torch.cat([self._cache[conv_id], fe], dim=0)
-        else:
-            self._cache[conv_id] = fe
-        if self._cache[conv_id].size(0) > self.max_turns * 2:
-            self._cache[conv_id] = self._cache[conv_id][-self.max_turns:]
+        history = self._cache.setdefault(conv_id, [])
+        if turn_index is not None:
+            # A padded DistributedSampler can repeat examples. Replace rather
+            # than duplicate an already-seen turn.
+            history[:] = [(turn, embed) for turn, embed in history if turn != turn_index]
+        history.append((turn_index, fe))
+        if len(history) > self.max_turns * 2:
+            if all(turn is not None for turn, _ in history):
+                history.sort(key=lambda item: item[0])
+            del history[:-self.max_turns]
 
     def batch_update(
         self,
@@ -126,7 +143,8 @@ class ContextCache:
         else:
             order = range(len(conv_ids))
         for i in order:
-            self.update(conv_ids[i], turn_embeds[i])
+            turn_index = turn_indices[i] if turn_indices is not None else None
+            self.update(conv_ids[i], turn_embeds[i], turn_index=turn_index)
 
     def clear(self, conv_id: Optional[str] = None):
         """Clear cache for one or all conversations."""

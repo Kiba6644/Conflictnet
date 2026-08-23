@@ -154,8 +154,25 @@ def main():
             label_smoothing=args.label_smoothing,
         )
 
+    def _backend_manifest(model: ConflictNet) -> dict[str, str]:
+        """Return rank-0 encoder choices that must not vary across DDP ranks."""
+        manifest = {
+            "CONFLICTNET_TEXT_BACKEND": getattr(model.text_encoder, "_backend", "pretrained"),
+            "CONFLICTNET_LORA_BACKEND": getattr(model.text_encoder, "_lora_backend", "auto"),
+        }
+        audio = model.audio_encoder
+        if args.audio_encoder == "emotion2vec":
+            manifest["CONFLICTNET_EMOTION2VEC_BACKEND"] = getattr(audio, "_backend", "funasr")
+            fallback = getattr(audio, "_model", None)
+            if fallback is not None:
+                manifest["CONFLICTNET_WAVLM_BACKEND"] = getattr(fallback, "_backend", "auto")
+        elif args.audio_encoder == "wavlm":
+            manifest["CONFLICTNET_WAVLM_BACKEND"] = getattr(audio, "_backend", "auto")
+        return {key: value for key, value in manifest.items() if value != "auto"}
+
     is_ddp = local_rank != -1 and torch.distributed.is_initialized()
     prewarmed_model = None
+    manifest_path = Path(args.output_dir) / ".ddp_encoder_manifest.json"
     if is_ddp:
         # Hugging Face and SpeechBrain use disk caches, but they are not a
         # transaction across all of the files a model needs.  In particular,
@@ -174,6 +191,11 @@ def main():
             # the first build (notably PEFT / pretrained encoder initialisation),
             # while every other rank builds only once from the warmed cache.
             prewarmed_model = _build_model()
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            manifest_tmp = manifest_path.with_suffix(".tmp")
+            with open(manifest_tmp, "w") as f:
+                json.dump(_backend_manifest(prewarmed_model), f)
+            os.replace(manifest_tmp, manifest_path)
             
             # Pre-warm tokenizer (used by all datasets)
             from transformers import AutoTokenizer
@@ -189,6 +211,14 @@ def main():
             torch.set_rng_state(rng_state)
             logger.info("[DDP] Pre-warm complete — releasing the remaining ranks.")
         torch.distributed.barrier()
+        if local_rank != 0:
+            try:
+                with open(manifest_path) as f:
+                    selected_backends = json.load(f)
+                os.environ.update(selected_backends)
+                logger.info(f"[DDP] Rank {local_rank} using rank-0 encoder choices: {selected_backends}")
+            except (OSError, json.JSONDecodeError) as e:
+                raise RuntimeError(f"Could not read rank-0 DDP encoder manifest: {e}") from e
 
     # --- Build datasets ---
     from data.datasets import (
@@ -301,7 +331,10 @@ def main():
     
     from torch.utils.data.distributed import DistributedSampler
     train_sampler = DistributedSampler(train_set) if local_rank != -1 else None
-    val_sampler = DistributedSampler(val_set, shuffle=False) if local_rank != -1 else None
+    # Validation is evaluated in full by rank 0 (and the metrics are broadcast
+    # by the trainer). Sharding it caused each rank to select checkpoints from a
+    # different partial validation set and made DistributedSampler pad samples.
+    val_sampler = None
 
     train_loader = DataLoader(
         train_set,

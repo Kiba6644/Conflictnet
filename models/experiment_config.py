@@ -96,7 +96,7 @@ class ExperimentConfig:
             if attr_name.startswith("_"):
                 continue
             val = getattr(args, attr_name)
-            if attr_name in known:
+            if attr_name in known and val is not None:
                 kwargs[attr_name] = val
             elif attr_name in cli_to_field:
                 # Invert: CLI stores action_store_true as "True when disabled"

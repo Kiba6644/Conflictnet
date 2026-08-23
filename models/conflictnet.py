@@ -453,8 +453,12 @@ class ConflictNet(nn.Module):
 
         # 4. Word-level divergence features
         word_div_feats = None
-        if self.word_divergence is not None and need_frames:
-            assert audio_frames is not None and text_tokens is not None
+        if (
+            self.word_divergence is not None
+            and need_frames
+            and audio_frames is not None
+            and text_tokens is not None
+        ):
             assert word_timestamps is not None and token_word_boundaries is not None
             word_div_feats = self.word_divergence.forward_from_encoder_hidden(
                 audio_frame_embeds=audio_frames,
@@ -464,8 +468,8 @@ class ConflictNet(nn.Module):
             )
         elif self.word_divergence is not None and not self._word_div_warned:
             logger.warning(
-                "WordDivergence enabled but word_timestamps not provided. "
-                "Run `python scripts/run_mfa_alignment.py` to generate alignments."
+                "WordDivergence unavailable for this batch (missing alignments or "
+                "encoder frame features); using zero divergence features."
             )
             self._word_div_warned = True
 

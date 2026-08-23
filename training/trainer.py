@@ -130,6 +130,7 @@ class ConflictNetTrainer:
         self.cfg = cfg
         self.exp_config = exp_config
         self.device = device
+        self._autocast_device_type = torch.device(device).type
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -170,13 +171,18 @@ class ConflictNetTrainer:
         ], weight_decay=0.01, **kwargs)
         grad_accum_steps = int(self.cfg.get("gradient_accumulation_steps", 1))
         steps_per_epoch = max(1, len(self.train_loader) // grad_accum_steps)
-        epochs = self.cfg.get("epochs", 50)
-        from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
-        # Restart every 10 epochs worth of optimizer steps
-        self.scheduler = CosineAnnealingWarmRestarts(self.optimizer, T_0=steps_per_epoch * 10, T_mult=2)
+        epochs = int(self.cfg.get("epochs") or 50)
+        warmup_steps = int(self.cfg.get("warmup_steps") or 0)
+        self.scheduler = get_warmup_cosine_scheduler(
+            self.optimizer,
+            num_warmup_steps=warmup_steps,
+            num_training_steps=max(1, steps_per_epoch * epochs),
+        )
 
     def _setup_wandb(self):
         self.use_wandb = False
+        if torch.distributed.is_initialized() and torch.distributed.get_rank() != 0:
+            return
         try:
             import wandb  # type: ignore
             if os.environ.get("WANDB_PROJECT"):
@@ -237,18 +243,21 @@ class ConflictNetTrainer:
 
             # Populate context from cache (history of past turns for each conversation)
             conv_ids = batch.get("conversation_ids", [])
+            turn_indices = batch.get("turn_indices", None)
+            if isinstance(turn_indices, torch.Tensor):
+                turn_indices = turn_indices.cpu().tolist()
             if conv_ids and isinstance(conv_ids, list):
                 str_conv_ids: list[str] = [str(x) for x in conv_ids]
                 model_embed_dim = getattr(self.model, "embed_dim", 256)
                 embed_dim_val = model_embed_dim if isinstance(model_embed_dim, int) else 256
                 ctx_embeds, ctx_padding, _ = self.ctx_cache.get_batch_context(
-                    str_conv_ids, embed_dim=embed_dim_val
+                    str_conv_ids, embed_dim=embed_dim_val, turn_indices=turn_indices
                 )
             else:
                 ctx_embeds = None
                 ctx_padding = None
 
-            with torch.autocast(device_type=self.device, enabled=self.use_amp):
+            with torch.autocast(device_type=self._autocast_device_type, enabled=self.use_amp):
                 output = self.model(
                     audio=batch["audio"],
                     input_ids=batch["input_ids"],
@@ -270,9 +279,6 @@ class ConflictNetTrainer:
             # Update context cache with current turn fused embeddings
             if conv_ids and isinstance(conv_ids, list) and output.fused_embed is not None:
                 str_conv_ids: list[str] = [str(x) for x in conv_ids]
-                turn_indices = batch.get("turn_indices", None)
-                if isinstance(turn_indices, torch.Tensor):
-                    turn_indices = turn_indices.cpu().tolist()
                 self.ctx_cache.batch_update(str_conv_ids, output.fused_embed, turn_indices=turn_indices)
 
             loss = output.loss
@@ -334,6 +340,17 @@ class ConflictNetTrainer:
     def evaluate(self) -> Dict[str, float]:
         from sklearn.metrics import average_precision_score, f1_score, roc_auc_score
 
+        is_ddp = torch.distributed.is_initialized()
+        local_rank = int(os.environ.get("LOCAL_RANK", -1))
+        metric_keys = ("val/f1_binary", "val/auc_binary", "val/macro_ap", "val/f1_weighted")
+        if is_ddp and local_rank != 0:
+            # Rank 0 owns the complete validation loader. Waiting here avoids
+            # duplicate work and ensures every rank receives the same metric for
+            # checkpointing and early stopping.
+            metric_values = torch.zeros(len(metric_keys), device=self.device)
+            torch.distributed.broadcast(metric_values, src=0)
+            return {key: float(value) for key, value in zip(metric_keys, metric_values.cpu().tolist())}
+
         self.model.eval()
         # Clear context cache to prevent training dialogue context from
         # leaking into validation (fixes L3 data leakage path)
@@ -361,10 +378,16 @@ class ConflictNetTrainer:
                 for k, v in batch.items()
             }
             conv_ids = batch.get("conversation_ids", [])
+            turn_indices = batch.get("turn_indices", None)
+            if isinstance(turn_indices, torch.Tensor):
+                turn_indices = turn_indices.cpu().tolist()
+            str_conv_ids = [str(x) for x in conv_ids] if conv_ids else []
             ctx_embeds, ctx_padding, _ = self.ctx_cache.get_batch_context(
-                conv_ids, embed_dim=getattr(self.model, "embed_dim", 256)
-            ) if conv_ids else (None, None, [])
-            with torch.autocast(device_type=self.device, enabled=self.use_amp):
+                str_conv_ids,
+                embed_dim=getattr(self.model, "embed_dim", 256),
+                turn_indices=turn_indices,
+            ) if str_conv_ids else (None, None, [])
+            with torch.autocast(device_type=self._autocast_device_type, enabled=self.use_amp):
                 output = self.model(
                 audio=batch["audio"],
                 input_ids=batch["input_ids"],
@@ -377,6 +400,10 @@ class ConflictNetTrainer:
                 word_timestamps=batch.get("word_timestamps"),
                 token_word_boundaries=batch.get("token_word_boundaries"),
             )
+            if str_conv_ids and output.fused_embed is not None:
+                self.ctx_cache.batch_update(
+                    str_conv_ids, output.fused_embed, turn_indices=turn_indices
+                )
             all_probs.append(output.probs_type.float().cpu().numpy())
             all_labels.append(batch["conflict_type_labels"].cpu().numpy())
             all_binary.append(batch["conflict_binary"].cpu().numpy())
@@ -406,13 +433,17 @@ class ConflictNetTrainer:
                     pass
         macro_ap = float(np.mean(per_class_ap)) if per_class_ap else 0.0
 
-        return {
+        metrics = {
             "val/f1_binary": float(f1_binary),
             "val/auc_binary": float(auc_binary),
             "val/macro_ap": float(macro_ap),
             # val/f1_weighted drives best-checkpoint and early-stopping logic
             "val/f1_weighted": float(f1_binary),
         }
+        if is_ddp:
+            metric_values = torch.tensor([metrics[key] for key in metric_keys], device=self.device)
+            torch.distributed.broadcast(metric_values, src=0)
+        return metrics
 
     def train(
         self,
@@ -443,22 +474,29 @@ class ConflictNetTrainer:
                 import wandb  # type: ignore
                 wandb.log(all_metrics, step=self.global_step)
 
-            # Save latest checkpoint (overwrites previous to save disk space)
-            self._save_checkpoint(epoch, is_latest=True)
+            is_rank_zero = not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
+
+            # Checkpoints must have one writer. Concurrent rank writes can
+            # produce a weights file and training-state file from different
+            # steps, making resume silently incorrect.
+            if is_rank_zero:
+                self._save_checkpoint(epoch, is_latest=True)
 
             val_f1 = val_metrics.get("val/f1_weighted", 0.0)
             is_best = val_f1 > self.best_val_f1
             if is_best:
                 self.best_val_f1 = val_f1
-                self._save_checkpoint(epoch, is_best=True)
+                if is_rank_zero:
+                    self._save_checkpoint(epoch, is_best=True)
 
             # Clean, compact 1-line epoch summary
             tag = " ⭐ (New Best)" if is_best else ""
-            logger.info(
-                f"[Epoch {epoch+1:02d}/{n_epochs:02d}] {phase.upper():<8} | "
-                f"Train Loss: {train_metrics['loss']:.4f} | "
-                f"Val F1: {val_f1:.4f}{tag}"
-            )
+            if is_rank_zero:
+                logger.info(
+                    f"[Epoch {epoch+1:02d}/{n_epochs:02d}] {phase.upper():<8} | "
+                    f"Train Loss: {train_metrics['loss']:.4f} | "
+                    f"Val F1: {val_f1:.4f}{tag}"
+                )
 
             # Early stopping check (only during finetune phase)
             if not is_pretrain:
@@ -514,14 +552,21 @@ class ConflictNetTrainer:
         _safe_save = getattr(torch, "save")
 
         # 1. Model weights → safetensors (primary, pickle-free)
+        # Save the underlying module so a checkpoint made by DDP can be loaded
+        # by single-GPU evaluation/serving without every key being prefixed with
+        # ``module.``.
+        model_for_state = self.model.module if isinstance(
+            self.model, nn.parallel.DistributedDataParallel
+        ) else self.model
+        model_state = model_for_state.state_dict()
         try:
             from safetensors.torch import save_file as st_save
             st_path = self.output_dir / f"{prefix}.safetensors"
-            st_save(self.model.state_dict(), str(st_path))
+            st_save(model_state, str(st_path))
         except ImportError:
             # Fallback: torch.save model weights only (still state_dict, not full model)
             logger.warning("[Checkpoint] safetensors not installed — falling back to torch.save for model weights")
-            _safe_save(self.model.state_dict(), self.output_dir / f"{prefix}.pt")  # nosec
+            _safe_save(model_state, self.output_dir / f"{prefix}.pt")  # nosec
 
         # 2. Training state → .pt (optimizer/scheduler contain non-tensor objects)
         training_state: Dict[str, Any] = {
@@ -563,11 +608,22 @@ class ConflictNetTrainer:
         checkpoint_path = Path(path)
         from models.checkpoint_utils import load_checkpoint_state, extract_model_state
 
+        model_for_state = self.model.module if isinstance(
+            self.model, nn.parallel.DistributedDataParallel
+        ) else self.model
+
+        def _load_model_state(state: Dict[str, Any]):
+            # Support historical DDP checkpoints while writing new checkpoints
+            # in the portable, unwrapped format above.
+            if state and all(key.startswith("module.") for key in state):
+                state = {key.removeprefix("module."): value for key, value in state.items()}
+            return model_for_state.load_state_dict(state, strict=False)
+
         if checkpoint_path.suffix == ".safetensors":
             # Safe path: safetensors model weights + sidecar files
             model_state = load_checkpoint_state(checkpoint_path, device=self.device)
 
-            result = self.model.load_state_dict(model_state, strict=False)
+            result = _load_model_state(model_state)
             if result.missing_keys:
                 logger.warning(f"Missing keys in checkpoint: {result.missing_keys}")
             if result.unexpected_keys:
@@ -600,7 +656,7 @@ class ConflictNetTrainer:
             ckpt: Dict[str, Any] = load_checkpoint_state(checkpoint_path, device=self.device)
 
             model_state = extract_model_state(ckpt)
-            result = self.model.load_state_dict(model_state, strict=False)
+            result = _load_model_state(model_state)
             if result.missing_keys:
                 logger.warning(f"Missing keys in checkpoint: {result.missing_keys}")
             if result.unexpected_keys:
