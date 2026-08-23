@@ -142,8 +142,17 @@ def main():
             logger.info("[DDP] Rank 0 pre-warming pretrained model and tokenizer caches...")
             rng_state = torch.get_rng_state()
             cuda_rng_states = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+            
+            # Pre-warm model
             warmup_model = _build_model()
             del warmup_model
+            
+            # Pre-warm tokenizer (used by all datasets)
+            from transformers import AutoTokenizer
+            logger.info("[DDP] Rank 0 downloading/caching tokenizer...")
+            tok_name = args.tokenizer_path or "microsoft/deberta-v3-large"
+            _ = AutoTokenizer.from_pretrained(tok_name)
+            
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -198,11 +207,14 @@ def main():
     val_datasets = []
 
     if args.iemocap_root:
+        logger.info(f"[Rank {local_rank}] Loading IEMOCAP dataset...")
         # Leave-one-session-out: sessions 1-4 train, 5 val
         train_datasets.append(IEMOCAPDataset(args.iemocap_root, sessions=[1, 2, 3, 4]))
         val_datasets.append(IEMOCAPDataset(args.iemocap_root, sessions=[5]))
+        logger.info(f"[Rank {local_rank}] IEMOCAP loaded.")
 
     if args.mustard_root:
+        logger.info(f"[Rank {local_rank}] Loading MUStARD dataset...")
         mustard_kwargs = {}
         if args.tokenizer_path:
             mustard_kwargs["tokenizer_name"] = args.tokenizer_path
@@ -219,18 +231,27 @@ def main():
             split="val",
             **mustard_kwargs
         ))
+        logger.info(f"[Rank {local_rank}] MUStARD loaded.")
 
     if args.cremad_root:
+        logger.info(f"[Rank {local_rank}] Loading CREMA-D dataset...")
         tok_kwargs = {"tokenizer_name": args.tokenizer_path} if args.tokenizer_path else {}
         train_datasets.append(CREMADDataset(args.cremad_root, split="train", **tok_kwargs))
         val_datasets.append(CREMADDataset(args.cremad_root, split="val", **tok_kwargs))
+        logger.info(f"[Rank {local_rank}] CREMA-D loaded.")
 
     if args.meld_root:
+        logger.info(f"[Rank {local_rank}] Loading MELD dataset...")
         meld_kwargs = {"max_samples": args.meld_max_samples} if args.meld_max_samples else {}
         if args.tokenizer_path:
             meld_kwargs["tokenizer_name"] = args.tokenizer_path
+        logger.info(f"[Rank {local_rank}] Initializing MELD train...")
         train_datasets.append(MELDDataset(args.meld_root, split="train", **meld_kwargs))
+        logger.info(f"[Rank {local_rank}] Initializing MELD val...")
         val_datasets.append(MELDDataset(args.meld_root, split="val", **meld_kwargs))
+        logger.info(f"[Rank {local_rank}] MELD loaded.")
+
+    logger.info(f"[Rank {local_rank}] Finished loading all dataset components.")
 
     if not train_datasets:
         raise ValueError("Provide at least one of --iemocap_root, --mustard_root, --cremad_root, or --meld_root")
