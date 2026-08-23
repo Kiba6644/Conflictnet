@@ -12,6 +12,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import logging
 import os
@@ -125,6 +126,48 @@ def main():
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
+
+    # Define this before dataset construction: MELD/MUStARD dataset constructors
+    # initialise a Hugging Face tokenizer, so starting the model warm-up later is
+    # too late to protect a fresh cache from concurrent torchrun workers.
+    from models.conflictnet import ConflictNet
+
+    def _build_model():
+        return ConflictNet(
+            audio_encoder_name=args.audio_encoder,
+            embed_dim=args.embed_dim,
+            use_speaker_norm=not args.no_speaker_norm,
+            use_temporal=not args.no_temporal,
+            use_cross_attn_injection=not args.no_cross_attn_injection,
+            use_speaker_adaptive_threshold=not args.no_speaker_adaptive_threshold,
+            use_baseline_subtract=not args.no_baseline_subtract,
+            use_word_divergence=not args.no_word_divergence,
+            lora_r=args.lora_r,
+            label_smoothing=args.label_smoothing,
+        )
+
+    is_ddp = local_rank != -1 and torch.distributed.is_initialized()
+    if is_ddp:
+        # Hugging Face and SpeechBrain use disk caches, but they are not a
+        # transaction across all of the files a model needs.  In particular,
+        # letting every rank build a dataset first can race on the tokenizer
+        # before the old, model-only barrier below is reached.  Build every
+        # pretrained component once on rank zero before *any* dataset or model
+        # constructor runs in another worker.
+        if local_rank == 0:
+            logger.info("[DDP] Rank 0 pre-warming pretrained model and tokenizer caches...")
+            rng_state = torch.get_rng_state()
+            cuda_rng_states = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+            warmup_model = _build_model()
+            del warmup_model
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                if cuda_rng_states is not None:
+                    torch.cuda.set_rng_state_all(cuda_rng_states)
+            torch.set_rng_state(rng_state)
+            logger.info("[DDP] Pre-warm complete — releasing the remaining ranks.")
+        torch.distributed.barrier()
 
     # --- Build datasets ---
     from data.datasets import (
@@ -247,33 +290,16 @@ def main():
 
     logger.info(f"Train samples: {len(train_set)} | Val samples: {len(val_set)}")
 
-    # --- Build model (DDP-safe: rank 0 first to warm HF/SpeechBrain cache) ---
+    # --- Build model (DDP-safe: rank 0 first) ---
     # In multi-GPU DDP runs torchrun spawns all worker processes simultaneously.
     # If every rank tries to download HuggingFace / SpeechBrain weights at the
     # same time, one rank can get a partial/corrupt file and fall back to a
     # dummy encoder (4 trainable tensors vs 102), which the DDP consistency
     # check then correctly rejects with RuntimeError.
     #
-    # Fix: rank 0 builds the model first (all downloads happen here), then
-    # signals via barrier(), and only then do the other ranks build from the
-    # now-fully-populated on-disk cache. Non-DDP runs skip the barriers.
-    from models.conflictnet import ConflictNet
-
-    def _build_model():
-        return ConflictNet(
-            audio_encoder_name=args.audio_encoder,
-            embed_dim=args.embed_dim,
-            use_speaker_norm=not args.no_speaker_norm,
-            use_temporal=not args.no_temporal,
-            use_cross_attn_injection=not args.no_cross_attn_injection,
-            use_speaker_adaptive_threshold=not args.no_speaker_adaptive_threshold,
-            use_baseline_subtract=not args.no_baseline_subtract,
-            use_word_divergence=not args.no_word_divergence,
-            lora_r=args.lora_r,
-            label_smoothing=args.label_smoothing,
-        )
-
-    is_ddp = local_rank != -1 and torch.distributed.is_initialized()
+    # The cache was warmed before dataset construction.  Keep this second
+    # rank-zero-first construction as a safeguard for non-cache state such as
+    # SpeechBrain's local savedir.
     if is_ddp:
         if local_rank == 0:
             logger.info("[DDP] Rank 0 building model and warming HF/SpeechBrain cache...")
