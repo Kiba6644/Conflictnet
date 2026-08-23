@@ -121,6 +121,14 @@ def parse_args(argv=None):
 @record
 def main():
     args = parse_args(argv=None)
+    # torchrun workers are not guaranteed to retain the notebook shell's
+    # working directory. Resolve output paths relative to this repository once
+    # so every rank shares manifests and checkpoint files.
+    repo_root = Path(__file__).resolve().parent.parent
+    output_dir = Path(args.output_dir)
+    if not output_dir.is_absolute():
+        output_dir = repo_root / output_dir
+    args.output_dir = str(output_dir.resolve())
     
     # Set internal environment variables so downstream models load local weights,
     # ensuring this works even when torchrun spawns fresh child processes.
