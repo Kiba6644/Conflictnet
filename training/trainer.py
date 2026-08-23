@@ -179,7 +179,7 @@ class ConflictNetTrainer:
             weight_decay = 0.0 if is_no_decay else 0.01
 
             if "audio_encoder" in n:
-                audio_encoder_params.append({"params": p, "lr": 0.0, "weight_decay": weight_decay})
+                audio_encoder_params.append({"params": p, "lr": 1e-5, "weight_decay": weight_decay})
             elif "text_encoder" in n:
                 if "lora" in n:
                     deberta_lora_params.append({"params": p, "lr": 2e-5, "weight_decay": weight_decay})
@@ -687,9 +687,10 @@ class ConflictNetTrainer:
         # Save the underlying module so a checkpoint made by DDP can be loaded
         # by single-GPU evaluation/serving without every key being prefixed with
         # ``module.``.
-        model_for_state = self.ema_model.module if isinstance(
-            self.ema_model, nn.parallel.DistributedDataParallel
-        ) else getattr(self.ema_model, "module", self.ema_model)
+        model_for_state = self.ema_model.module
+        if hasattr(model_for_state, "module"):
+            model_for_state = model_for_state.module
+            
         model_state = model_for_state.state_dict()
         try:
             from safetensors.torch import save_file as st_save
@@ -750,7 +751,12 @@ class ConflictNetTrainer:
             if state and all(key.startswith("module.") for key in state):
                 state = {key.removeprefix("module."): value for key, value in state.items()}
             res = model_for_state.load_state_dict(state, strict=False)
-            self.ema_model.module.load_state_dict(model_for_state.state_dict())
+            
+            ema_model_for_state = self.ema_model.module
+            if hasattr(ema_model_for_state, "module"):
+                ema_model_for_state = ema_model_for_state.module
+                
+            ema_model_for_state.load_state_dict(model_for_state.state_dict())
             return res
 
         if checkpoint_path.suffix == ".safetensors":
