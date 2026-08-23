@@ -137,7 +137,14 @@ class TransformerTemporalContext(nn.Module):
         if self.speaker_role_emb is not None and speaker_roles is not None:
             x = self.speaker_role_emb(x, speaker_roles)
 
-        attn_mask = self._causal_mask(T, turn_embeds.device) if self.causal else None
+        # Skip causal mask when T == 1 (single turn cannot see future turns anyway;
+        # passing a (1,1) mask alongside src_key_padding_mask triggers a known
+        # PyTorch SDPA kernel deadlock on Turing/T4 GPUs).
+        attn_mask = self._causal_mask(T, turn_embeds.device) if (self.causal and T > 1) else None
+
+        # Omit src_key_padding_mask if no elements in the batch are actually padded
+        if padding_mask is not None and not padding_mask.any():
+            padding_mask = None
 
         per_turn = self.transformer(
             x,
