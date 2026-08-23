@@ -392,7 +392,8 @@ def main():
         pin_memory=True,
         # persistent_workers avoids re-spawning processes between epochs
         # (saves ~10-20s per epoch on Kaggle T4 with 4 workers)
-        persistent_workers=(optimal_workers > 0),
+        # persistent_workers=True causes an IPC/shared-memory deadlock on Kaggle between epochs.
+        persistent_workers=False,
         prefetch_factor=2 if optimal_workers > 0 else None,
     )
     val_loader = DataLoader(
@@ -403,7 +404,8 @@ def main():
         num_workers=optimal_workers,
         collate_fn=val_collate,
         pin_memory=True,
-        persistent_workers=(optimal_workers > 0),
+        # persistent_workers=True causes an IPC/shared-memory deadlock on Kaggle between epochs.
+        persistent_workers=False,
         prefetch_factor=2 if optimal_workers > 0 else None,
     )
 
