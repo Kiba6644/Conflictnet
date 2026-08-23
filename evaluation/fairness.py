@@ -11,7 +11,7 @@ Usage:
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Union
 
 import numpy as np
 
@@ -19,7 +19,7 @@ import numpy as np
 def fairness_audit(
     y_pred: np.ndarray,
     y_true: np.ndarray,
-    sensitive_features: Dict[str, List[Any]],
+    sensitive_features: Union[List[Any], Dict[str, List[Any]]],
     metric_fn=None,
 ) -> Dict[str, Any]:
     """Run FairLearn fairness audit across multiple attributes.
@@ -27,12 +27,18 @@ def fairness_audit(
     Args:
         y_pred: Binary predictions (N,).
         y_true: Ground truth labels (N,).
-        sensitive_features: Dict of group membership per sample (e.g. {"gender": [...], "age": [...]}).
+        sensitive_features: List of group membership per sample or Dict of group membership per sample (e.g. {"gender": [...], "age": [...]}).
         metric_fn: Metric function (default: f1_score).
 
     Returns:
-        Dict with per-attribute reports.
+        Dict with per-attribute reports, or direct report if list was passed.
     """
+    from typing import Union
+    
+    is_list = isinstance(sensitive_features, list)
+    if is_list:
+        sensitive_features = {"group": sensitive_features}
+        
     reports = {}
     try:
         from fairlearn.metrics import (  # type: ignore
@@ -74,9 +80,17 @@ def fairness_audit(
             if "f1" in by_group and isinstance(by_group["f1"], dict):
                 by_group = by_group["f1"]
 
-            overall = float(mf.overall["f1"]) if isinstance(mf.overall, dict) else float(mf.overall)
+            if hasattr(mf.overall, "to_dict"):
+                overall_raw = mf.overall.to_dict()
+                overall = float(overall_raw.get("f1", overall_raw))
+            else:
+                overall = float(mf.overall["f1"]) if isinstance(mf.overall, dict) else float(mf.overall)
             diffs = mf.difference()
-            disparity = float(diffs["f1"]) if isinstance(diffs, dict) or hasattr(diffs, "__getitem__") and "f1" in diffs else float(diffs)
+            if hasattr(diffs, "to_dict"):
+                diffs_raw = diffs.to_dict()
+                disparity = float(diffs_raw.get("f1", diffs_raw))
+            else:
+                disparity = float(diffs["f1"]) if isinstance(diffs, dict) or hasattr(diffs, "__getitem__") and "f1" in diffs else float(diffs)
 
             reports[attr_name] = {
                 "overall_f1": overall,
@@ -86,7 +100,7 @@ def fairness_audit(
                 "equalized_odds_difference": float(eod),
             }
 
-        return reports
+        return reports["group"] if is_list else reports
 
     except ImportError:
         print("[WARN] fairlearn not installed. Run: pip install fairlearn")
@@ -112,4 +126,4 @@ def fairness_audit(
                 "equalized_odds_difference": None,
             }
 
-        return reports
+        return reports["group"] if is_list else reports
