@@ -74,7 +74,7 @@ def parse_args(argv=None):
     p.add_argument("--musan_path", type=str, default=None, help="MUSAN corpus for noise augmentation")
     p.add_argument("--output_dir", type=str, default="checkpoints")
     p.add_argument("--audio_encoder", type=str, default="emotion2vec",
-                   choices=["emotion2vec", "wavlm", "wavlm_weighted", "wav2vec2"])
+                   choices=["emotion2vec", "wavlm", "wavlm_weighted", "wav2vec2", "whisper", "dual"])
     p.add_argument("--audio_encoder_path", type=str, default=None,
                    help="Path to local audio encoder directory to bypass ModelScope")
     p.add_argument("--text_encoder_path", type=str, default=None,

@@ -115,6 +115,9 @@ class TransformerTemporalContext(nn.Module):
         self.causal = causal
 
         ff_dim = ff_dim or embed_dim * 4
+        
+        self.pos_encoding = LearnedPositionalEncoding(max_turns, embed_dim)
+        self.speaker_role_emb = SpeakerRoleEmbedding(embed_dim) if use_speaker_roles else None
 
         encoder_layer = DropPathTransformerEncoderLayer(
             d_model=embed_dim,
