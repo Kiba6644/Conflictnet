@@ -230,7 +230,12 @@ class ConflictNetTrainer:
 
         try:
             from tqdm.auto import tqdm
-            loader_iter = tqdm(self.train_loader, desc=f"Train Epoch {epoch+1}", disable=torch.distributed.is_initialized() and int(os.environ.get("LOCAL_RANK", -1)) != 0)
+            loader_iter = tqdm(
+                self.train_loader, 
+                desc=f"Train Epoch {epoch+1}", 
+                disable=torch.distributed.is_initialized() and int(os.environ.get("LOCAL_RANK", -1)) != 0,
+                file=sys.stdout
+            )
         except ImportError:
             loader_iter = self.train_loader
 
@@ -351,7 +356,12 @@ class ConflictNetTrainer:
 
         try:
             from tqdm.auto import tqdm
-            loader_iter = tqdm(self.val_loader, desc="Eval", disable=torch.distributed.is_initialized() and int(os.environ.get("LOCAL_RANK", -1)) != 0)
+            loader_iter = tqdm(
+                self.val_loader, 
+                desc="Eval", 
+                disable=torch.distributed.is_initialized() and int(os.environ.get("LOCAL_RANK", -1)) != 0,
+                file=sys.stdout
+            )
         except ImportError:
             loader_iter = self.val_loader
 
