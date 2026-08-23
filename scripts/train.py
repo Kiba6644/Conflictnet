@@ -220,7 +220,11 @@ def main():
             
         # Now that we've safely pre-warmed everything on Rank 0 without 
         # SpeechBrain messing up the DDP queue, we can safely initialize DDP!
-        torch.distributed.init_process_group(backend="nccl")
+        import datetime
+        torch.distributed.init_process_group(
+            backend="nccl",
+            timeout=datetime.timedelta(seconds=60)
+        )
             
         if local_rank == 0:
             logger.info("[DDP] Rank 0 waiting at first barrier...")

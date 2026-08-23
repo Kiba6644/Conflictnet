@@ -336,6 +336,7 @@ class ConflictNet(nn.Module):
         return_frames: bool = False,
         return_tokens: bool = False,
         precomputed_audio_embed: Optional[torch.Tensor] = None,
+        precomputed_speaker_embed: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Encode audio and text to shared space, apply speaker normalization.
 
@@ -389,10 +390,20 @@ class ConflictNet(nn.Module):
 
         # Speaker path — pure-torch, prosody_z is pre-computed
         if self.speaker_norm is not None:
-            _, speaker_feat = self.speaker_norm(
-                audio=audio,
-                prosody_z=prosody_z,  # may be None → uses zeros inside
-            )
+            if precomputed_speaker_embed is not None:
+                # Bypass ECAPA-TDNN inside DDP by directly providing the precomputed
+                # 192-d speaker embedding. This prevents SpeechBrain from deadlocking
+                # DDP's asynchronous buffer broadcast.
+                spk_embed = precomputed_speaker_embed
+                if prosody_z is None:
+                    prosody_z = torch.zeros(audio.size(0), self.speaker_norm._prosody_dim, device=audio.device)
+                combined = torch.cat([spk_embed, prosody_z], dim=-1)
+                speaker_feat = self.speaker_norm.spk_proj(combined)
+            else:
+                _, speaker_feat = self.speaker_norm(
+                    audio=audio,
+                    prosody_z=prosody_z,  # may be None → uses zeros inside
+                )
         else:
             speaker_feat = torch.zeros_like(audio_embed)
 
@@ -442,6 +453,8 @@ class ConflictNet(nn.Module):
         # timeout: FunASR's sequential per-sample inference holds the thread long
         # enough that the faster rank's gradient all-reduce times out.
         precomputed_audio_embed: Optional[torch.Tensor] = None,
+        # Pre-extracted speaker embedding (bypasses ECAPA-TDNN inside DDP scope)
+        precomputed_speaker_embed: Optional[torch.Tensor] = None,
     ) -> ConflictNetOutput:
 
         # 1. Encode (all pure-torch — numpy preprocessing done in collate_fn)
@@ -453,6 +466,7 @@ class ConflictNet(nn.Module):
             return_frames=need_frames,
             return_tokens=need_frames,
             precomputed_audio_embed=precomputed_audio_embed,
+            precomputed_speaker_embed=precomputed_speaker_embed,
         )
 
         # 2. Cross-modal attention: audio↔text BEFORE fusion (+ optional dialogue context)

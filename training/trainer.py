@@ -272,13 +272,17 @@ class ConflictNetTrainer:
             else:
                 ctx_embeds = None
                 ctx_padding = None
-            # Extract FunASR embeddings outside DDP scope to prevent NCCL timeout
-            # (Fixes Bug 10 / the DDP broadcast timeout reported by user)
+            # Extract embeddings from frozen inference models outside DDP scope
+            # to prevent their execution from deadlocking DDP's asynchronous buffer broadcast.
             _model_inner = getattr(self.model, "module", self.model)
             precomputed_audio_embed = None
-            if hasattr(_model_inner, "audio_encoder") and getattr(_model_inner.audio_encoder, "_backend", None) == "funasr":
-                with torch.no_grad():
+            precomputed_speaker_embed = None
+            
+            with torch.no_grad():
+                if hasattr(_model_inner, "audio_encoder") and getattr(_model_inner.audio_encoder, "_backend", None) == "funasr":
                     precomputed_audio_embed = _model_inner.audio_encoder(batch["audio"])
+                if getattr(_model_inner, "speaker_norm", None) is not None:
+                    precomputed_speaker_embed = _model_inner.speaker_norm.encode_speaker(batch["audio"])
 
             with torch.autocast(device_type=self._autocast_device_type, enabled=self.use_amp):
                 output = self.model(
@@ -287,6 +291,7 @@ class ConflictNetTrainer:
                     attention_mask=batch["attention_mask"],
                     audio_attention_mask=batch.get("audio_attention_mask"),
                     precomputed_audio_embed=precomputed_audio_embed,
+                    precomputed_speaker_embed=precomputed_speaker_embed,
                     context_embeds=ctx_embeds,
                     context_padding=ctx_padding,
                     speaker_roles=batch.get("speaker_roles"),
@@ -429,10 +434,14 @@ class ConflictNetTrainer:
                     embed_dim=_embed_dim,
                     turn_indices=turn_indices,
                 ) if str_conv_ids else (None, None, [])
-                # FunASR bypass for evaluate as well
+                # Inference bypass for evaluate as well
                 precomputed_audio_embed = None
-                if hasattr(_model_inner, "audio_encoder") and getattr(_model_inner.audio_encoder, "_backend", None) == "funasr":
-                    precomputed_audio_embed = _model_inner.audio_encoder(batch["audio"])
+                precomputed_speaker_embed = None
+                with torch.no_grad():
+                    if hasattr(_model_inner, "audio_encoder") and getattr(_model_inner.audio_encoder, "_backend", None) == "funasr":
+                        precomputed_audio_embed = _model_inner.audio_encoder(batch["audio"])
+                    if getattr(_model_inner, "speaker_norm", None) is not None:
+                        precomputed_speaker_embed = _model_inner.speaker_norm.encode_speaker(batch["audio"])
 
                 with torch.autocast(device_type=self._autocast_device_type, enabled=self.use_amp):
                     output = self.model(
@@ -441,6 +450,7 @@ class ConflictNetTrainer:
                     attention_mask=batch["attention_mask"],
                     audio_attention_mask=batch.get("audio_attention_mask"),
                     precomputed_audio_embed=precomputed_audio_embed,
+                    precomputed_speaker_embed=precomputed_speaker_embed,
                     prosody_z=batch.get("prosody_z"),
                     context_embeds=ctx_embeds,
                     context_padding=ctx_padding,
