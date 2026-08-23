@@ -724,28 +724,20 @@ class MELDDataset(Dataset):
             logger.warning(f"[MELD] CSV not found in {self.root} for split {split_name}")
             return []
 
-        # Index all audio/video files (.wav, .mp4, etc.) across likely directories
-        valid_exts = {".wav", ".mp4", ".flac", ".m4a", ".mp3", ".mkv", ".avi"}
-        media_index: Dict[str, Path] = {}
-        if self.root.exists():
-            search_dirs = [
-                self.root / split_name / f"{split_name}_splits",
-                self.root / f"{split_name}_splits",
-                self.root / split_name,
-                self.root,
-            ]
-            for search_dir in search_dirs:
-                if not search_dir.exists() or not search_dir.is_dir():
-                    continue
-                logger.info(f"[MELD] Indexing media files in {search_dir} (non-recursive)...")
-                try:
-                    for f in os.listdir(str(search_dir)):
-                        if any(f.lower().endswith(ext) for ext in valid_exts):
-                            p = search_dir / f
-                            media_index[p.stem] = p
-                            media_index[p.name] = p
-                except Exception as e:
-                    logger.warning(f"[MELD] Error scanning {search_dir}: {e}")
+        # Hardcode split folder paths based on Kaggle MELD structure
+        if split_name == "train":
+            split_folder = self.root / "train" / "train_splits"
+        elif split_name == "dev":
+            split_folder = self.root / "dev" / "dev_splits_complete"
+        elif split_name == "test":
+            # Kaggle UI might truncate the name; check likely candidates
+            split_folder = self.root / "test" / "output_repeated_splits_test"
+            if not split_folder.exists():
+                split_folder = self.root / "test" / "output_repeated_splits"
+            if not split_folder.exists():
+                split_folder = self.root / "test" / "output_repeated_spl"
+        else:
+            split_folder = self.root / split_name
 
         items = []
         with open(csv_path, "r", encoding="utf-8") as f:
@@ -783,15 +775,8 @@ class MELDDataset(Dataset):
                 emotion = str(row.get(field_map["emotion"], "neutral")).strip().lower()
                 speaker = str(row.get(field_map["speaker"], "unknown")).strip()
 
-                clip_key = f"dia{dia_id}_utt{utt_id}"
-                wav_path = media_index.get(clip_key)
-                if wav_path is None:
-                    wav_path = media_index.get(f"{clip_key}.mp4") or media_index.get(f"{clip_key}.wav")
-                if wav_path is None and dia_id.isdigit() and utt_id.isdigit():
-                    num_key = f"dia{int(dia_id)}_utt{int(utt_id)}"
-                    wav_path = media_index.get(num_key) or media_index.get(f"{num_key}.mp4")
-
-                if wav_path is None:
+                wav_path = split_folder / f"dia{dia_id}_utt{utt_id}.mp4"
+                if not wav_path.exists():
                     continue
 
                 conflict = emotion in MELD_CONFLICT_EMOTIONS
