@@ -724,21 +724,28 @@ class MELDDataset(Dataset):
             logger.warning(f"[MELD] CSV not found in {self.root} for split {split_name}")
             return []
 
-        # Index all audio/video files (.wav, .mp4, etc.) across self.root
+        # Index all audio/video files (.wav, .mp4, etc.) across likely directories
         valid_exts = {".wav", ".mp4", ".flac", ".m4a", ".mp3", ".mkv", ".avi"}
         media_index: Dict[str, Path] = {}
         if self.root.exists():
-            try:
-                for root_d, dirs_d, files_d in os.walk(str(self.root)):
-                    if ".git" in dirs_d:
-                        dirs_d.remove(".git")
-                    for f in files_d:
+            search_dirs = [
+                self.root / split_name / f"{split_name}_splits",
+                self.root / f"{split_name}_splits",
+                self.root / split_name,
+                self.root,
+            ]
+            for search_dir in search_dirs:
+                if not search_dir.exists() or not search_dir.is_dir():
+                    continue
+                logger.info(f"[MELD] Indexing media files in {search_dir} (non-recursive)...")
+                try:
+                    for f in os.listdir(str(search_dir)):
                         if any(f.lower().endswith(ext) for ext in valid_exts):
-                            p = Path(root_d) / f
+                            p = search_dir / f
                             media_index[p.stem] = p
                             media_index[p.name] = p
-            except Exception as e:
-                logger.warning(f"[MELD] Error scanning {self.root}: {e}")
+                except Exception as e:
+                    logger.warning(f"[MELD] Error scanning {search_dir}: {e}")
 
         items = []
         with open(csv_path, "r", encoding="utf-8") as f:
