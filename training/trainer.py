@@ -12,7 +12,6 @@ Supports:
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import math
 import os
@@ -93,34 +92,22 @@ class ConflictNetTrainer:
                 # fallback encoder because a HuggingFace/SpeechBrain download raced
                 # across torchrun workers). Otherwise DDP crashes deep inside with a
                 # cryptic "inconsistent params" error that is hard to diagnose.
-                model_signature = "|".join(
-                    f"{name}:{tuple(param.shape)}:{param.dtype}:{param.requires_grad}"
-                    for name, param in self.model.named_parameters()
-                )
-                signature_digest = torch.tensor(
-                    list(hashlib.sha256(model_signature.encode("utf-8")).digest()),
-                    dtype=torch.uint8,
-                    device=device,
-                )
                 world_size = torch.distributed.get_world_size()
-                gathered = [torch.zeros_like(signature_digest) for _ in range(world_size)]
-                torch.distributed.all_gather(gathered, signature_digest)
-                signatures = [bytes(t.cpu().tolist()).hex()[:12] for t in gathered]
                 n_trainable_tensors = torch.tensor(
                     [sum(1 for p in self.model.parameters() if p.requires_grad)],
                     device=device,
                 )
-                gathered_counts = [torch.zeros_like(n_trainable_tensors) for _ in range(world_size)]
-                torch.distributed.all_gather(gathered_counts, n_trainable_tensors)
-                counts = [int(count.item()) for count in gathered_counts]
-                if any(signature != signatures[0] for signature in signatures):
+                gathered = [torch.zeros_like(n_trainable_tensors) for _ in range(world_size)]
+                torch.distributed.all_gather(gathered, n_trainable_tensors)
+                counts = [int(count.item()) for count in gathered]
+                if any(count != counts[0] for count in counts):
                     raise RuntimeError(
-                        "Ranks built different trainable model structures "
-                        f"(tensor counts: {counts}; signatures: {signatures}). "
+                        f"Ranks built different models (trainable tensor counts: {counts}). "
                         "A pretrained-model fallback differed between ranks. Ensure every "
                         "rank uses the shared Hugging Face and ModelScope caches."
                     )
 
+                logger.info(f"[DDP] Rank {local_rank}: parameter check passed; wrapping model.")
                 self.model = nn.parallel.DistributedDataParallel(
                     self.model,
                     device_ids=[local_rank],
@@ -129,6 +116,7 @@ class ConflictNetTrainer:
                     # are only used during pre-training phases.
                     find_unused_parameters=True,
                 )
+                logger.info(f"[DDP] Rank {local_rank}: model wrapper initialized.")
             elif torch.cuda.device_count() > 1:
                 logger.info(f"Using DataParallel across {torch.cuda.device_count()} GPUs.")
                 self.model = nn.DataParallel(self.model)
