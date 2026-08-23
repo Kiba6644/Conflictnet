@@ -223,7 +223,7 @@ def main():
         import datetime
         torch.distributed.init_process_group(
             backend="nccl",
-            timeout=datetime.timedelta(seconds=1800)
+            timeout=datetime.timedelta(seconds=300)
         )
             
         if local_rank == 0:
