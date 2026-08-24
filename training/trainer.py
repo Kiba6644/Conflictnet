@@ -631,6 +631,10 @@ class ConflictNetTrainer:
                     f"Train Loss: {train_metrics['loss']:.4f} | "
                     f"Val F1: {val_f1:.4f}{tag}"
                 )
+                logger.info("Detailed Validation Metrics:")
+                for k, v in val_metrics.items():
+                    if k.startswith("val/"):
+                        logger.info(f"  {k:<16}: {v:.4f}")
 
             # Synchronize all ranks after checkpoint saving to prevent rank 1
             # from rushing ahead into the next epoch's forward pass while rank 0
@@ -655,6 +659,26 @@ class ConflictNetTrainer:
                         break
 
         logger.info(f"✅ Training complete. Best val F1 = {self.best_val_f1:.4f}")
+
+        # --- FINAL EVALUATION ---
+        # Load the best model and evaluate it to print/save final metrics
+        best_path = Path(self.output_dir) / "best_model.safetensors"
+        if best_path.exists():
+            logger.info("Loading best model for final evaluation...")
+            self.load_checkpoint(str(best_path))
+            
+            final_metrics = self.evaluate()
+            
+            is_rank_zero = not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
+            if is_rank_zero:
+                logger.info("=== FINAL BEST VALIDATION RESULTS ===")
+                for k, v in final_metrics.items():
+                    if k.startswith("val/"):
+                        logger.info(f"  {k:<16}: {v:.4f}")
+                
+                with open(Path(self.output_dir) / "final_eval_results.json", "w") as f:
+                    import json
+                    json.dump(final_metrics, f, indent=4)
 
     @staticmethod
     def _get_git_info() -> Dict[str, str]:
