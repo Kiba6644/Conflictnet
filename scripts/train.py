@@ -445,17 +445,18 @@ def main():
         shuffle=False
     )
 
+    # We are loading precomputed .pt feature dictionaries from disk, which is virtually instantaneous.
+    # Spawning multiprocessing workers (num_workers > 0) + pin_memory=True causes massive 
+    # IPC / shared-memory deadlocks and Segmentation Faults on Kaggle dual-T4 at the start of Epoch 2.
+    optimal_workers = 0
+
     train_loader = DataLoader(
         train_set,
         batch_sampler=train_batch_sampler,
         num_workers=optimal_workers,
         collate_fn=train_collate,
-        pin_memory=True,
-        # persistent_workers avoids re-spawning processes between epochs
-        # (saves ~10-20s per epoch on Kaggle T4 with 4 workers)
-        # persistent_workers=True causes an IPC/shared-memory deadlock on Kaggle between epochs.
+        pin_memory=False,
         persistent_workers=False,
-        prefetch_factor=2 if optimal_workers > 0 else None,
     )
     
     val_loader = DataLoader(
@@ -463,10 +464,8 @@ def main():
         batch_sampler=val_batch_sampler,
         num_workers=optimal_workers,
         collate_fn=val_collate,
-        pin_memory=True,
-        # persistent_workers=True causes an IPC/shared-memory deadlock on Kaggle between epochs.
+        pin_memory=False,
         persistent_workers=False,
-        prefetch_factor=2 if optimal_workers > 0 else None,
     )
 
     logger.info(f"Train samples: {len(train_set)} | Val samples: {len(val_set)}")
