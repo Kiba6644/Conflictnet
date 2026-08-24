@@ -358,7 +358,7 @@ class IEMOCAPDataset(Dataset):
 
         return {
             "audio": audio,
-            "audio_np": audio.numpy(),
+            "audio_np": audio.numpy() if isinstance(audio, torch.Tensor) else None,
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "conflict_binary": torch.tensor(item["conflict_binary"], dtype=torch.long),
@@ -517,7 +517,7 @@ class MUStARDDataset(Dataset):
                     token_word_boundaries = compute_token_word_boundaries(text, self.tokenizer)
         return {
             "audio": audio,
-            "audio_np": audio.numpy(),
+            "audio_np": audio.numpy() if isinstance(audio, torch.Tensor) else None,
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "conflict_binary": torch.tensor(sarcasm, dtype=torch.long),
@@ -664,7 +664,7 @@ class CREMADDataset(Dataset):
                     token_word_boundaries = compute_token_word_boundaries(text, self.tokenizer)
         return {
             "audio": audio,
-            "audio_np": audio.numpy(),
+            "audio_np": audio.numpy() if isinstance(audio, torch.Tensor) else None,
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "conflict_binary": torch.tensor(item["conflict_binary"], dtype=torch.long),
@@ -879,7 +879,7 @@ class MELDDataset(Dataset):
                     token_word_boundaries = compute_token_word_boundaries(text, self.tokenizer)
         return {
             "audio": audio,
-            "audio_np": audio.numpy(),
+            "audio_np": audio.numpy() if isinstance(audio, torch.Tensor) else None,
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "conflict_binary": torch.tensor(item["conflict_binary"], dtype=torch.long),
@@ -1035,7 +1035,7 @@ class CMUMOSEIDataset(Dataset):
                     token_word_boundaries = compute_token_word_boundaries(text, self.tokenizer)
         return {
             "audio": audio,
-            "audio_np": audio.numpy(),
+            "audio_np": audio.numpy() if isinstance(audio, torch.Tensor) else None,
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "conflict_binary": torch.tensor(item["conflict_binary"], dtype=torch.long),
@@ -1194,7 +1194,7 @@ class CASEDataset(Dataset):
                     token_word_boundaries = compute_token_word_boundaries(text, self.tokenizer)
         return {
             "audio": audio,
-            "audio_np": audio.numpy(),
+            "audio_np": audio.numpy() if isinstance(audio, torch.Tensor) else None,
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "conflict_binary": torch.tensor(item["conflict_binary"], dtype=torch.long),
@@ -1305,10 +1305,12 @@ def _collate_core(
     batch_out = []
     if augmentor is not None and augmentor.available:
         for b in batch:
-            aug_np = augmentor(b["audio_np"])
-            # Create a shallow copy and update so we don't mutate the original dict
-            b_new = {**b, "audio_np": aug_np, "audio": torch.tensor(aug_np, dtype=torch.float32)}
-            batch_out.append(b_new)
+            if b.get("audio_np") is not None:
+                aug_np = augmentor(b["audio_np"])
+                b_new = {**b, "audio_np": aug_np, "audio": torch.tensor(aug_np, dtype=torch.float32)}
+                batch_out.append(b_new)
+            else:
+                batch_out.append(b)
         batch = batch_out
 
     # Check if we loaded precomputed dicts instead of raw audio tensors
