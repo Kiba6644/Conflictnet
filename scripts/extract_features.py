@@ -7,6 +7,7 @@ embeddings as .pt files right next to the original audio files.
 
 import argparse
 import logging
+import os
 from pathlib import Path
 
 import torch
@@ -19,8 +20,11 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def extract_features(data_root: str, batch_size: int = 16):
+def extract_features(data_root: str, output_dir: str, batch_size: int = 16):
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    out_path = Path(output_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
     
     # 1. Initialize models (frozen)
     logger.info("Initializing models...")
@@ -41,11 +45,15 @@ def extract_features(data_root: str, batch_size: int = 16):
     for ext in ["*.mp4", "*.wav"]:
         audio_files.extend(list(root.rglob(ext)))
         
-    logger.info(d"Found {len(audio_files)} audio files in {data_root}")
+    logger.info(f"Found {len(audio_files)} audio files in {data_root}")
     
-    # Filter out those that already have a .pt file
-    pending_files = [f for f in audio_files if notf.with_suffix('.pt').exists()]
-    logger.info(d"Extracting features for {len(pending_files)} files (skipped {len(audio_files) - len(pending_files)} already processed)...")
+    # Filter out those that already have a .pt file in output_dir
+    pending_files = []
+    for f in audio_files:
+        pt_path = out_path / f.with_suffix('.pt').name
+        if not pt_path.exists():
+            pending_files.append(f)
+    logger.info(f"Extracting features for {len(pending_files)} files (skipped {len(audio_files) - len(pending_files)} already processed)...")
     
     # 3. Process in batches
     for i in tqdm(range(0, len(pending_files), batch_size), desc="Extracting"):
@@ -75,7 +83,7 @@ def extract_features(data_root: str, batch_size: int = 16):
             
         # Save individually
         for j, path in enumerate(batch_files):
-            pt_path = path.with_suffix('.pt')
+            pt_path = out_path / path.with_suffix('.pt').name
             data = {
                 "audio": audio_embeds[j].cpu().clone(),
                 "speaker": speaker_embeds[j].cpu().clone(),
@@ -87,7 +95,8 @@ def extract_features(data_root: str, batch_size: int = 16):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_root", type=str, required=True, help="Path to dataset root (e.g. /kaggle/input/.../MELD.Raw)")
+    parser.add_argument("--output_dir", type=str, default="/kaggle/working/features", help="Output directory for pt files")
     parser.add_argument("--batch_size", type=int, default=16)
     args = parser.parse_args()
     
-    extract_features(args.data_root, args.batch_size)
+    extract_features(args.data_root, args.output_dir, args.batch_size)
