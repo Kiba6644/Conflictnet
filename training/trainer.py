@@ -239,11 +239,11 @@ class ConflictNetTrainer:
             self.cfg.get("gradient_accumulation_steps", 1)
         )
 
-        # Update curriculum sampler if present
-        if isinstance(self.train_loader.sampler, CurriculumSampler):
+        # Ensure distributed sampler shuffles differently each epoch
+        if hasattr(self.train_loader.sampler, "set_epoch"):
             self.train_loader.sampler.set_epoch(epoch)
-        elif hasattr(self.train_loader.sampler, "set_epoch"):
-            self.train_loader.sampler.set_epoch(epoch)
+        elif hasattr(self.train_loader, "batch_sampler") and hasattr(self.train_loader.batch_sampler, "set_epoch"):
+            self.train_loader.batch_sampler.set_epoch(epoch)
 
         self.optimizer.zero_grad()
         self.ctx_cache.clear()

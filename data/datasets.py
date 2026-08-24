@@ -821,21 +821,43 @@ class MELDDataset(Dataset):
                     "dataset_name": "meld",
                 })
         if self.max_samples is not None and len(items) > self.max_samples:
-            # Stratified subsample: preserve conflict/non-conflict ratio
-            rng = random.Random(42)
-            conflict_items = [x for x in items if x["conflict_binary"] == 1]
-            non_conflict_items = [x for x in items if x["conflict_binary"] == 0]
             total = len(items)
-            n_conflict = round(self.max_samples * len(conflict_items) / total)
-            n_non_conflict = self.max_samples - n_conflict
-            rng.shuffle(conflict_items)
-            rng.shuffle(non_conflict_items)
-            items = conflict_items[:n_conflict] + non_conflict_items[:n_non_conflict]
-            rng.shuffle(items)
+            # Group items by dialogue_id to preserve chronological context
+            dialogues = {}
+            for item in items:
+                d_id = item["dialogue_id"]
+                if d_id not in dialogues:
+                    dialogues[d_id] = []
+                dialogues[d_id].append(item)
+
+            # Deterministic shuffle of dialogue IDs
+            dialogue_ids = sorted(list(dialogues.keys()))
+            rng = random.Random(42)
+            rng.shuffle(dialogue_ids)
+
+            subsampled_items = []
+            n_conflict = 0
+            n_non_conflict = 0
+
+            for d_id in dialogue_ids:
+                if len(subsampled_items) >= self.max_samples:
+                    break
+                # Ensure turns within the dialogue are in chronological order
+                d_items = sorted(dialogues[d_id], key=lambda x: x["turn_index"])
+                subsampled_items.extend(d_items)
+                
+                for x in d_items:
+                    if x["conflict_binary"] == 1:
+                        n_conflict += 1
+                    else:
+                        n_non_conflict += 1
+
+            items = subsampled_items
             logger.info(
                 f"[MELD] {self.split}: subsampled to {len(items)} "
                 f"({n_conflict} conflict, {n_non_conflict} non-conflict) "
-                f"from {total} total (max_samples={self.max_samples})"
+                f"from {total} total (max_samples={self.max_samples}) "
+                f"preserving {len(set(x['dialogue_id'] for x in items))} full dialogues."
             )
         return items
 

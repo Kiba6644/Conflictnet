@@ -154,6 +154,7 @@ class ConflictClassifier(nn.Module):
         fused_embed: torch.Tensor,
         word_div: Optional[torch.Tensor] = None,
         speaker_feat: Optional[torch.Tensor] = None,
+        dataset_names: Optional[List[str]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
         """
         Returns: (logits_type, probs_type, severity, conflict_flag)
@@ -173,6 +174,13 @@ class ConflictClassifier(nn.Module):
         feat = self.shared_mlp(x)
 
         logits_type = self.type_head(feat)       # (B, n_types)
+
+        if dataset_names is not None:
+            sarcasm_logits = self.sarcasm_head(feat).squeeze(-1)  # (B,)
+            for i, name in enumerate(dataset_names):
+                if name == "mustard":
+                    logits_type[i, 0] = sarcasm_logits[i]
+
         probs_type = torch.sigmoid(logits_type)  # (B, n_types)
 
         severity = None

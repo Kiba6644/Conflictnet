@@ -378,15 +378,39 @@ def main():
     from torch.utils.data.distributed import DistributedSampler
     train_sampler = DistributedSampler(train_set) if local_rank != -1 else None
     # Validation is evaluated in full by rank 0 (and the metrics are broadcast
-    # by the trainer). Sharding it caused each rank to select checkpoints from a
-    # different partial validation set and made DistributedSampler pad samples.
-    val_sampler = None
+    import torch.distributed as dist
+    from data.samplers import DialogueDistributedBatchSampler
+
+    # Set up training batch sampler
+    if is_ddp_run:
+        train_batch_sampler = DialogueDistributedBatchSampler(
+            train_set, 
+            batch_size=args.batch_size or 16, 
+            num_replicas=dist.get_world_size(), 
+            rank=dist.get_rank(),
+            shuffle=True
+        )
+    else:
+        train_batch_sampler = DialogueDistributedBatchSampler(
+            train_set, 
+            batch_size=args.batch_size or 16, 
+            num_replicas=1, 
+            rank=0,
+            shuffle=True
+        )
+
+    # Set up validation batch sampler
+    val_batch_sampler = DialogueDistributedBatchSampler(
+        val_set, 
+        batch_size=args.batch_size or 16, 
+        num_replicas=1, 
+        rank=0,
+        shuffle=False
+    )
 
     train_loader = DataLoader(
         train_set,
-        batch_size=args.batch_size or 16,
-        shuffle=(train_sampler is None),
-        sampler=train_sampler,
+        batch_sampler=train_batch_sampler,
         num_workers=optimal_workers,
         collate_fn=train_collate,
         pin_memory=True,
@@ -396,11 +420,10 @@ def main():
         persistent_workers=False,
         prefetch_factor=2 if optimal_workers > 0 else None,
     )
+    
     val_loader = DataLoader(
         val_set,
-        batch_size=args.batch_size or 16,
-        shuffle=False,
-        sampler=val_sampler,
+        batch_sampler=val_batch_sampler,
         num_workers=optimal_workers,
         collate_fn=val_collate,
         pin_memory=True,

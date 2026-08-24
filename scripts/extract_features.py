@@ -17,7 +17,6 @@ sys.path.append(str(Path(__file__).parent.parent))
 import torch
 from tqdm.auto import tqdm
 
-from models.conflictnet import ConflictNet
 from data.datasets import load_audio
 
 logging.basicConfig(level=logging.INFO)
@@ -32,16 +31,18 @@ def extract_features(data_root: str, output_dir: str, batch_size: int = 16):
     
     # 1. Initialize models (frozen)
     logger.info("Initializing models...")
-    model = ConflictNet(
-        audio_encoder_name="emotion2vec",
-        use_speaker_norm=True,
-    )
-    model.eval()
-    model.to(device)
+    from models.encoders.audio import build_audio_encoder
+    from models.alignment.speaker_norm import SpeakerNormalizer
     
-    # We only need the audio parts
-    audio_encoder = model.audio_encoder
-    speaker_norm = model.speaker_norm
+    # We only instantiate what we need to avoid downloading text models
+    audio_encoder = build_audio_encoder("emotion2vec")
+    audio_encoder.eval()
+    audio_encoder.to(device)
+    
+    # ECAPA-TDNN outputs 192, we can just use defaults
+    speaker_norm = SpeakerNormalizer(embed_dim=256, use_baseline_subtract=True)
+    speaker_norm.eval()
+    speaker_norm.to(device)
     
     # 2. Find all audio files
     root = Path(data_root)

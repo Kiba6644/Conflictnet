@@ -560,6 +560,7 @@ class ConflictNet(nn.Module):
             fused_embed=current_ctx,
             word_div=word_div_feats,
             speaker_feat=speaker_feat,
+            dataset_names=dataset_names,
         )
 
         # 6. Compute losses if labels provided
@@ -576,7 +577,16 @@ class ConflictNet(nn.Module):
             # Fixed: use conflict_binary_labels which is dataset-agnostic.
             sarcasm_mask = None
             if conflict_binary_labels is not None:
-                sarcasm_mask = conflict_binary_labels.bool()
+                if dataset_names is not None:
+                    # Only MUStARD and CASE contain sarcasm pairs (intentionally mismatched).
+                    # For MELD/CREMA-D, angry/fearful speech is aligned, so do NOT mask it.
+                    is_sarcasm = torch.tensor(
+                        [n in ("mustard", "case") for n in dataset_names],
+                        device=conflict_binary_labels.device
+                    )
+                    sarcasm_mask = conflict_binary_labels.bool() & is_sarcasm
+                else:
+                    sarcasm_mask = torch.zeros_like(conflict_binary_labels, dtype=torch.bool)
 
             cl = self.contrastive_loss_fn(
                 audio_embed, text_embed,

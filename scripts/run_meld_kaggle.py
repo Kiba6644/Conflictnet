@@ -315,7 +315,7 @@ def main():
         "torchrun", f"--nproc_per_node={n_gpus}",
         str(REPO / "scripts" / "train.py"),
         "--meld_root",                   str(meld_root),
-        "--meld_max_samples",            "700",
+        "--meld_max_samples",            "1200",
         "--epochs",                      "40",
         "--pretrain_epochs",             "3",
         "--batch_size",                  "4",
