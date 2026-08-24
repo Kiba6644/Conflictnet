@@ -1292,11 +1292,18 @@ def _collate_core(
         batch = batch_out
 
     # Check if we loaded precomputed dicts instead of raw audio tensors
+    # Safely handle mixed batches by defaulting missing .pt files to zero tensors
     is_precomputed = isinstance(batch[0]["audio"], dict)
     
     if is_precomputed:
-        audio_padded = torch.stack([b["audio"]["audio"] for b in batch])
-        speaker_padded = torch.stack([b["audio"]["speaker"] for b in batch])
+        audio_padded = torch.stack([
+            b["audio"]["audio"] if isinstance(b["audio"], dict) else torch.zeros(256) 
+            for b in batch
+        ])
+        speaker_padded = torch.stack([
+            b["audio"]["speaker"] if isinstance(b["audio"], dict) else torch.zeros(192) 
+            for b in batch
+        ])
         audio_attention_mask = torch.ones(len(batch), 1, dtype=torch.bool)
     else:
         speaker_padded = None
