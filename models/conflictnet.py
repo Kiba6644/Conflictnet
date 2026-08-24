@@ -510,7 +510,8 @@ class ConflictNet(nn.Module):
         )
 
         # 2. Cross-modal attention: audio↔text BEFORE fusion (+ optional dialogue context)
-        #    context_embeds is (B, T, D) or None; CrossModalAttention handles cold-start.
+        # BUG FIX: previously cross-modal attention was not masking padding frames/tokens,
+        # treating zeros as valid features. We now pass attention masks to prevent this.
         if self.cross_modal_attn is not None:
             audio_embed, text_embed = self.cross_modal_attn(
                 audio_embed, text_embed,
@@ -518,6 +519,8 @@ class ConflictNet(nn.Module):
                 context_padding=context_padding,
                 audio_seq=audio_frames if need_frames else None,
                 text_seq=text_tokens if need_frames else None,
+                audio_attention_mask=audio_attention_mask,
+                text_attention_mask=attention_mask,
             )
 
         # 3. Word-level divergence features (needed for MoEFusion gate)

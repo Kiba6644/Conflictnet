@@ -81,6 +81,8 @@ class CrossModalAttention(nn.Module):
         context_padding: Optional[torch.Tensor] = None,
         audio_seq: Optional[torch.Tensor] = None,
         text_seq: Optional[torch.Tensor] = None,
+        audio_attention_mask: Optional[torch.Tensor] = None,
+        text_attention_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         
         B = audio_embed.size(0)
@@ -101,12 +103,32 @@ class CrossModalAttention(nn.Module):
         a_seq = audio_seq if audio_seq is not None else audio_embed.unsqueeze(1)
         t_seq = text_seq if text_seq is not None else text_embed.unsqueeze(1)
         
+        # key_padding_mask expects True for padding (ignored) elements.
+        # our attention masks are True for valid elements, so we invert them.
+        if text_attention_mask is not None and text_seq is not None:
+            valid_t = ~text_attention_mask
+        else:
+            valid_t = torch.zeros(B, t_seq.size(1), dtype=torch.bool, device=device)
+            
+        if audio_attention_mask is not None and audio_seq is not None:
+            # We assume audio_attention_mask is aligned with audio_seq frames.
+            # FunASR frames downsample by 320, so we can interpolate the mask.
+            # But Wait: if the user passes the mask for the raw waveform, it's 160000 long!
+            # We should just use a length-based mask.
+            lengths = audio_attention_mask.sum(dim=1)
+            frame_lengths = torch.ceil(lengths / 320.0).long()
+            max_f = a_seq.size(1)
+            idx = torch.arange(max_f, device=device).unsqueeze(0)
+            valid_a = idx >= frame_lengths.unsqueeze(1)
+        else:
+            valid_a = torch.zeros(B, a_seq.size(1), dtype=torch.bool, device=device)
+        
         for i in range(self.num_layers):
             text_kv = t_seq
             audio_kv = a_seq
             
-            kv_padding_audio: Optional[torch.Tensor] = None
-            kv_padding_text: Optional[torch.Tensor] = None
+            kv_padding_audio: Optional[torch.Tensor] = valid_t
+            kv_padding_text: Optional[torch.Tensor] = valid_a
 
             if context_seq is not None:
                 _, T, D = context_seq.shape
@@ -114,8 +136,6 @@ class CrossModalAttention(nn.Module):
                 text_kv = torch.cat([text_kv, context_seq], dim=1)
                 audio_kv = torch.cat([audio_kv, context_seq], dim=1)
                 if context_padding is not None:
-                    valid_t = torch.zeros(B, t_seq.size(1), dtype=torch.bool, device=device)
-                    valid_a = torch.zeros(B, a_seq.size(1), dtype=torch.bool, device=device)
                     kv_padding_audio = torch.cat([valid_t, context_padding], dim=1)
                     kv_padding_text = torch.cat([valid_a, context_padding], dim=1)
                     
@@ -125,8 +145,10 @@ class CrossModalAttention(nn.Module):
                         text_kv = torch.cat([text_kv, neutral], dim=1)
                         audio_kv = torch.cat([audio_kv, neutral], dim=1)
                         pad_ext = torch.zeros(B, 1, dtype=torch.bool, device=device)
-                        kv_padding_audio = torch.cat([kv_padding_audio, pad_ext], dim=1)
-                        kv_padding_text = torch.cat([kv_padding_text, pad_ext], dim=1)
+                        if kv_padding_audio is not None:
+                            kv_padding_audio = torch.cat([kv_padding_audio, pad_ext], dim=1)
+                        if kv_padding_text is not None:
+                            kv_padding_text = torch.cat([kv_padding_text, pad_ext], dim=1)
 
             # Audio attends to Text (+ context)
             q_audio = a_seq
