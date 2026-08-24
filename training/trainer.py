@@ -705,6 +705,7 @@ class ConflictNetTrainer:
           - ``*_meta.json``: scalar metadata (epoch, step, F1)
         """
         import json as _json
+        import shutil
 
         if is_best:
             prefix = "best_model"
@@ -715,21 +716,42 @@ class ConflictNetTrainer:
 
         _safe_save = getattr(torch, "save")
 
+        # FAST PATH: If this is the "best" save, we JUST saved "latest" milliseconds ago.
+        # Just use OS-level copy, saving 100+ seconds of I/O serialization!
+        if is_best:
+            latest_st = self.output_dir / "latest_model.safetensors"
+            latest_pt = self.output_dir / "latest_model.pt"
+            latest_ts = self.output_dir / "latest_model_training_state.pt"
+            latest_meta = self.output_dir / "latest_model_meta.json"
+            
+            if latest_st.exists():
+                shutil.copy(latest_st, self.output_dir / f"{prefix}.safetensors")
+            elif latest_pt.exists():
+                shutil.copy(latest_pt, self.output_dir / f"{prefix}.pt")
+                
+            if latest_ts.exists():
+                shutil.copy(latest_ts, self.output_dir / f"{prefix}_training_state.pt")
+            if latest_meta.exists():
+                shutil.copy(latest_meta, self.output_dir / f"{prefix}_meta.json")
+            return
+
         # 1. Model weights → safetensors (primary, pickle-free)
-        # Save the underlying module so a checkpoint made by DDP can be loaded
-        # by single-GPU evaluation/serving without every key being prefixed with
-        # ``module.``.
         model_for_state = self.ema_model.module
         if hasattr(model_for_state, "module"):
             model_for_state = model_for_state.module
             
-        model_state = model_for_state.state_dict()
+        # Optimization: Only save trainable parameters! Frozen encoders take up 1.5GB 
+        # of disk space and take forever to serialize on Kaggle's slow EBS drives.
+        full_state = model_for_state.state_dict()
+        trainable_keys = {name for name, param in model_for_state.named_parameters() if param.requires_grad}
+        model_state = {k: v for k, v in full_state.items() if k in trainable_keys or not any(k.startswith(p_name) for p_name in [n for n, p in model_for_state.named_parameters()])}
+        
         try:
             from safetensors.torch import save_file as st_save
             st_path = self.output_dir / f"{prefix}.safetensors"
             st_save(model_state, str(st_path))
         except ImportError:
-            # Fallback: torch.save model weights only (still state_dict, not full model)
+            # Fallback: torch.save model weights only
             logger.warning("[Checkpoint] safetensors not installed — falling back to torch.save for model weights")
             _safe_save(model_state, self.output_dir / f"{prefix}.pt")  # nosec
 
