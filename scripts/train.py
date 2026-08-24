@@ -34,6 +34,16 @@ os.environ["NCCL_P2P_DISABLE"] = "1"
 os.environ["NCCL_IB_DISABLE"] = "1"
 
 import torch
+
+# Disable Memory-Efficient and Flash Attention backends globally.
+# On Kaggle's dual-T4 (Turing architecture) GPUs, PyTorch's scaled_dot_product_attention 
+# (which nn.MultiheadAttention uses) can enter infinite loops or cause Segmentation Faults 
+# when query_len=1 and key_len>1 (e.g. cross-modal attention with context).
+# Math backend is 100% stable and fast enough for our sequence lengths.
+torch.backends.cuda.enable_mem_efficient_sdp(False)
+torch.backends.cuda.enable_flash_sdp(False)
+torch.backends.cuda.enable_math_sdp(True)
+
 from torch.utils.data import DataLoader, ConcatDataset
 try:
     from torch.distributed.elastic.multiprocessing.errors import record
