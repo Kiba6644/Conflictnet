@@ -115,8 +115,12 @@ class ConflictNetTrainer:
                     # Must be True because some components (like swap_objective) 
                     # are only used during pre-training phases.
                     find_unused_parameters=True,
+                    # Disable buffer broadcast to prevent NCCL deadlocks at the start
+                    # of Epoch 2 when DDP tries to sync constant buffers (like pos_weight).
+                    # None of ConflictNet's buffers change during training, so this is safe.
+                    broadcast_buffers=False,
                 )
-                logger.info(f"[DDP] Rank {local_rank}: model wrapper initialized.")
+                logger.info(f"[DDP] Rank {local_rank}: model wrapper initialized (broadcast_buffers=False).")
             elif torch.cuda.device_count() > 1:
                 logger.info(f"Using DataParallel across {torch.cuda.device_count()} GPUs.")
                 self.model = nn.DataParallel(self.model)
