@@ -130,13 +130,22 @@ def main():
         output_dir = repo_root / output_dir
     args.output_dir = str(output_dir.resolve())
     
-    # Set internal environment variables so downstream models load local weights,
-    # ensuring this works even when torchrun spawns fresh child processes.
+    def fix_kaggle_path(p: str) -> str:
+        if p and "/datasets/nith27/" in p:
+            fixed = p.replace("/datasets/nith27/", "/")
+            if os.path.exists(fixed):
+                return fixed
+        return p
+
     if args.audio_encoder_path:
+        args.audio_encoder_path = fix_kaggle_path(args.audio_encoder_path)
         os.environ["CONFLICTNET_EMOTION2VEC_PATH"] = args.audio_encoder_path
         os.environ["CONFLICTNET_WAVLM_PATH"] = args.audio_encoder_path
     if args.text_encoder_path:
+        args.text_encoder_path = fix_kaggle_path(args.text_encoder_path)
         os.environ["CONFLICTNET_DEBERTA_PATH"] = args.text_encoder_path
+    if args.tokenizer_path:
+        args.tokenizer_path = fix_kaggle_path(args.tokenizer_path)
 
     local_rank = int(os.environ.get("LOCAL_RANK", -1))
     
@@ -364,6 +373,33 @@ def main():
         logger.info(f"[Rank {local_rank}] MELD loaded.")
 
     logger.info(f"[Rank {local_rank}] Finished loading all dataset components.")
+
+    # In-line Feature Extraction for actual used files
+    # Only Rank 0 should do the extraction so multiple ranks don't write to the same files concurrently.
+    if local_rank in [-1, 0]:
+        def collect_paths(ds_list):
+            paths = []
+            for ds in ds_list:
+                for item in ds.items:
+                    if "audio_path" in item:
+                        paths.append(Path(item["audio_path"]))
+            return paths
+
+        logger.info("[Rank 0] Collecting audio paths for required features...")
+        required_audio_files = collect_paths(train_datasets) + collect_paths(val_datasets)
+        # Deduplicate
+        required_audio_files = list(set(required_audio_files))
+        
+        # We need an output directory for features, default to /kaggle/working/features
+        feature_dir = os.environ.get("CONFLICTNET_PT_DIR", "/kaggle/working/features")
+        
+        from scripts.extract_features import extract_features_for_files
+        logger.info(f"[Rank 0] Starting in-line feature extraction into {feature_dir}...")
+        extract_features_for_files(required_audio_files, feature_dir, batch_size=args.batch_size or 16)
+        logger.info("[Rank 0] In-line feature extraction complete.")
+        
+    if is_ddp_run:
+        dist.barrier()  # Wait for rank 0 to finish extraction before proceeding
 
     if not train_datasets:
         raise ValueError("Provide at least one of --iemocap_root, --mustard_root, --cremad_root, or --meld_root")
