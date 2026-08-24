@@ -52,13 +52,21 @@ def extract_features(data_root: str, output_dir: str, batch_size: int = 16):
         
     logger.info(f"Found {len(audio_files)} audio files in {data_root}")
     
-    # Filter out those that already have a .pt file in output_dir
+    # Filter out macOS hidden files and those that already have a .pt file
     pending_files = []
     for f in audio_files:
+        if f.name.startswith("._"):
+            continue  # Skip macOS hidden metadata files
+            
         pt_path = out_path / f.with_suffix('.pt').name
         if not pt_path.exists():
             pending_files.append(f)
-    logger.info(f"Extracting features for {len(pending_files)} files (skipped {len(audio_files) - len(pending_files)} already processed)...")
+    logger.info(f"Extracting features for {len(pending_files)} files (skipped {len(audio_files) - len(pending_files)} already processed or hidden)...")
+    
+    # Temporarily unset CONFLICTNET_PT_DIR so load_audio doesn't warn us
+    # about missing .pt files (since we are literally creating them now)
+    if "CONFLICTNET_PT_DIR" in os.environ:
+        del os.environ["CONFLICTNET_PT_DIR"]
     
     # 3. Process in batches
     for i in tqdm(range(0, len(pending_files), batch_size), desc="Extracting"):
