@@ -102,6 +102,10 @@ if __name__ == "__main__":
     parser.add_argument("--data_root", type=str, required=True, help="Path to dataset root (e.g. /kaggle/input/.../MELD.Raw)")
     parser.add_argument("--output_dir", type=str, default="/kaggle/working/features", help="Output directory for pt files")
     parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--audio_encoder_path", type=str, default=None, help="Local path for Emotion2Vec")
     args = parser.parse_args()
+    
+    if args.audio_encoder_path:
+        os.environ["CONFLICTNET_EMOTION2VEC_PATH"] = args.audio_encoder_path
     
     extract_features(args.data_root, args.output_dir, args.batch_size)
