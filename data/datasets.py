@@ -64,8 +64,13 @@ CONFLICT_EMOTIONS = {"ang", "fru"}  # used for binary conflict label in IEMOCAP
 # Shared utilities
 # ---------------------------------------------------------------------------
 
-def load_audio(path: str, target_sr: int = SAMPLE_RATE, max_len: float = MAX_AUDIO_LEN) -> torch.Tensor:
-    """Load and resample audio file to target_sr, truncate to max_len seconds."""
+def load_audio(path: str, target_sr: int = SAMPLE_RATE, max_len: float = MAX_AUDIO_LEN) -> torch.Tensor | Dict[str, torch.Tensor]:
+    """Load and resample audio file to target_sr, or load precomputed .pt dict if exists."""
+    pt_path = Path(path).with_suffix(".pt")
+    if pt_path.exists():
+        # Precomputed embedding dict, just load and return
+        return torch.load(pt_path, map_location="cpu", weights_only=True)
+
     try:
         waveform, sr = torchaudio.load(path)
     except Exception:
@@ -1279,13 +1284,22 @@ def _collate_core(
             batch_out.append(b_new)
         batch = batch_out
 
-    max_len = max(b["audio"].shape[0] for b in batch)
-    audio_padded = torch.zeros(len(batch), max_len)
-    audio_attention_mask = torch.zeros(len(batch), max_len, dtype=torch.bool)
-    for i, b in enumerate(batch):
-        t = b["audio"].shape[0]
-        audio_padded[i, :t] = b["audio"]
-        audio_attention_mask[i, :t] = True
+    # Check if we loaded precomputed dicts instead of raw audio tensors
+    is_precomputed = isinstance(batch[0]["audio"], dict)
+    
+    if is_precomputed:
+        audio_padded = torch.stack([b["audio"]["audio"] for b in batch])
+        speaker_padded = torch.stack([b["audio"]["speaker"] for b in batch])
+        audio_attention_mask = torch.ones(len(batch), 1, dtype=torch.bool)
+    else:
+        speaker_padded = None
+        max_len = max(b["audio"].shape[0] for b in batch)
+        audio_padded = torch.zeros(len(batch), max_len)
+        audio_attention_mask = torch.zeros(len(batch), max_len, dtype=torch.bool)
+        for i, b in enumerate(batch):
+            t = b["audio"].shape[0]
+            audio_padded[i, :t] = b["audio"]
+            audio_attention_mask[i, :t] = True
 
     # Look up or default prosody z-scores
     # Keys match utterance_id from each dataset's __getitem__ (audio file stem).
@@ -1322,17 +1336,20 @@ def _collate_core(
 
     return {
         "audio": audio_padded,
+        "speaker_embed": speaker_padded,
+        "is_precomputed": is_precomputed,
         "audio_attention_mask": audio_attention_mask,
         "input_ids": torch.stack([b["input_ids"] for b in batch]),
         "attention_mask": torch.stack([b["attention_mask"] for b in batch]),
         "prosody_z": prosody_z,
         "conflict_binary": torch.stack([b["conflict_binary"] for b in batch]).float(),
         "conflict_type_labels": torch.stack([b["conflict_type_labels"] for b in batch]),
-        "severity": torch.stack([b["severity"] for b in batch]).unsqueeze(-1),
-        "speaker_ids": speaker_ids,
-        "genders": genders,
+        "severity": torch.stack([b.get("severity", torch.tensor(0.0)) for b in batch]),
         "conversation_ids": conversation_ids,
         "turn_indices": turn_indices,
+        "speaker_ids": speaker_ids,
+        "genders": genders,
+        "utterance_ids": [b.get("utterance_id", "") for b in batch],
         "word_timestamps": word_timestamps,
         "token_word_boundaries": token_word_boundaries,
         "dataset_names": [b.get("dataset_name", "unknown") for b in batch],

@@ -289,9 +289,13 @@ class ConflictNetTrainer:
             precomputed_speaker_embed = None
             
             with torch.no_grad(), torch.autocast(device_type=self._autocast_device_type, enabled=self.use_amp):
-                if hasattr(_model_inner, "audio_encoder") and getattr(_model_inner.audio_encoder, "_backend", None) == "funasr":
+                if batch.get("is_precomputed", False):
+                    precomputed_audio_embed = batch["audio"]
+                elif hasattr(_model_inner, "audio_encoder") and getattr(_model_inner.audio_encoder, "_backend", None) == "funasr":
                     precomputed_audio_embed = _model_inner.audio_encoder(batch["audio"])
-                if getattr(_model_inner, "speaker_norm", None) is not None:
+                if batch.get("is_precomputed", False) and batch.get("speaker_embed") is not None:
+                    precomputed_speaker_embed = batch["speaker_embed"]
+                elif getattr(_model_inner, "speaker_norm", None) is not None:
                     precomputed_speaker_embed = _model_inner.speaker_norm.encode_speaker(batch["audio"])
 
             with torch.autocast(device_type=self._autocast_device_type, enabled=self.use_amp):
@@ -459,9 +463,13 @@ class ConflictNetTrainer:
                 precomputed_audio_embed = None
                 precomputed_speaker_embed = None
                 with torch.no_grad(), torch.autocast(device_type=self._autocast_device_type, enabled=self.use_amp):
-                    if hasattr(_model_inner, "audio_encoder") and getattr(_model_inner.audio_encoder, "_backend", None) == "funasr":
+                    if batch.get("is_precomputed", False):
+                        precomputed_audio_embed = batch["audio"]
+                    elif hasattr(_model_inner, "audio_encoder") and getattr(_model_inner.audio_encoder, "_backend", None) == "funasr":
                         precomputed_audio_embed = _model_inner.audio_encoder(batch["audio"])
-                    if getattr(_model_inner, "speaker_norm", None) is not None:
+                    if batch.get("is_precomputed", False) and batch.get("speaker_embed") is not None:
+                        precomputed_speaker_embed = batch["speaker_embed"]
+                    elif getattr(_model_inner, "speaker_norm", None) is not None:
                         precomputed_speaker_embed = _model_inner.speaker_norm.encode_speaker(batch["audio"])
 
                 with torch.autocast(device_type=self._autocast_device_type, enabled=self.use_amp):
