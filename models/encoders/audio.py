@@ -285,6 +285,18 @@ class Emotion2VecEncoder(nn.Module):
         super().__init__()
         local_path = os.environ.get("CONFLICTNET_EMOTION2VEC_PATH")
         if local_path:
+            if not os.path.exists(local_path):
+                # Auto-correct common Kaggle path typo (/kaggle/input/datasets/username/slug -> /kaggle/input/slug)
+                if "/datasets/nith27/" in local_path:
+                    fixed_path = local_path.replace("/datasets/nith27/", "/")
+                    if os.path.exists(fixed_path):
+                        local_path = fixed_path
+            
+            if not os.path.exists(local_path):
+                raise FileNotFoundError(
+                    f"[Emotion2Vec] The provided local path DOES NOT EXIST: {local_path}\n"
+                    f"Please check your --audio_encoder_path argument."
+                )
             model_name = local_path
             logger.info(f"[Emotion2Vec] Using local path: {local_path}")
             
@@ -339,21 +351,10 @@ class Emotion2VecEncoder(nn.Module):
         self._backend = "funasr"
         logger.info(f"[Emotion2Vec] funasr backend: {self.model_name} on {device_str}")
 
-    def forward(self, audio, attention_mask=None, return_frames=False):
-        if self._backend == "funasr":
-            pooled = self._forward_funasr(audio)
-            if return_frames:
-                return pooled, None
-            return pooled
-        out = self._model(audio, attention_mask=attention_mask, return_frames=return_frames)
-        if return_frames:
-            pooled, frames = out
-            return self.proj(pooled), frames
-        return self.proj(out)
-
     def _forward_funasr(self, audio):
         audio_np = audio.cpu().numpy()
-        results = []
+        pooled_results = []
+        frame_results = []
         for i in range(audio_np.shape[0]):
             emb = self._funasr_wrapper[0].generate(
                 input=audio_np[i], 
@@ -363,9 +364,40 @@ class Emotion2VecEncoder(nn.Module):
             )
             if isinstance(emb, list) and len(emb) > 0 and isinstance(emb[0], dict):
                 emb = emb[0].get("feats", emb[0])
-            emb = np.mean(emb, axis=0) if emb.ndim > 1 else emb
-            results.append(torch.from_numpy(emb).float())
-        return torch.stack(results).to(audio.device)
+            
+            # Keep frame-level features
+            if emb.ndim == 1:
+                frames = emb.reshape(1, -1)
+                pooled = emb
+            else:
+                frames = emb
+                pooled = np.mean(emb, axis=0)
+                
+            pooled_results.append(torch.from_numpy(pooled).float())
+            frame_results.append(torch.from_numpy(frames).float())
+            
+        pooled_tensor = torch.stack(pooled_results).to(audio.device)
+        
+        # Pad frame-level features for the batch
+        max_frames = max(f.shape[0] for f in frame_results)
+        dim = frame_results[0].shape[-1]
+        frames_padded = torch.zeros(audio_np.shape[0], max_frames, dim, device=audio.device)
+        for i, f in enumerate(frame_results):
+            frames_padded[i, :f.shape[0], :] = f.to(audio.device)
+            
+        return pooled_tensor, frames_padded
+
+    def forward(self, audio, attention_mask=None, return_frames=False):
+        if self._backend == "funasr":
+            pooled, frames = self._forward_funasr(audio)
+            if return_frames:
+                return pooled, frames
+            return pooled
+        out = self._model(audio, attention_mask=attention_mask, return_frames=return_frames)
+        if return_frames:
+            pooled, frames = out
+            return self.proj(pooled), frames
+        return self.proj(out)
 
     @property
     def device(self) -> torch.device:

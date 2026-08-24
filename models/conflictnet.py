@@ -236,10 +236,19 @@ class ConflictNet(nn.Module):
         self.use_baseline_subtract = use_baseline_subtract
         self.label_smoothing = label_smoothing
 
-        # Uniform pos_weight across all emotion slots — each is a minority class.
-        # Old code used sarcasm_pos_weight=8.0 on slot 0 only, which was wrong
-        # for MELD/CREMA-D where slot 0 is anger (different class balance).
-        pos_w = torch.full((n_conflict_types,), 3.0)
+        # Balanced pos_weight for MELD/CREMA-D classes: [anger, disgust, fear, joy, neutral, sadness]
+        # MELD frequencies: Anger 11%, Disgust 3%, Fear 3%, Joy 17%, Neutral 47%, Sadness 7%
+        # pos_weight = (1 - freq) / freq
+        # For Neutral: (1 - 0.47) / 0.47 = ~1.1
+        # For Disgust: (1 - 0.03) / 0.03 = ~32.0
+        # For Anger: (1 - 0.11) / 0.11 = ~8.0
+        pos_w = torch.tensor([8.0, 32.0, 32.0, 5.0, 1.1, 13.0])
+        # If n_conflict_types is different (e.g. MUStARD + sarcasm), pad with 3.0
+        if n_conflict_types != 6:
+            pos_w_padded = torch.full((n_conflict_types,), 3.0)
+            pos_w_padded[:min(6, n_conflict_types)] = pos_w[:min(6, n_conflict_types)]
+            pos_w = pos_w_padded
+            
         self.register_buffer("pos_weight", pos_w)
 
         # 1. Encoders
@@ -351,6 +360,7 @@ class ConflictNet(nn.Module):
         return_tokens: bool = False,
         precomputed_audio_embed: Optional[torch.Tensor] = None,
         precomputed_speaker_embed: Optional[torch.Tensor] = None,
+        precomputed_audio_frames: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Encode audio and text to shared space, apply speaker normalization.
 
@@ -364,6 +374,8 @@ class ConflictNet(nn.Module):
             precomputed_audio_embed: (B, audio_enc_dim) — pre-extracted audio
                 embedding to bypass the audio encoder (used when FunASR is
                 pre-extracted outside DDP scope to prevent NCCL timeout).
+            precomputed_audio_frames: (B, T_frames, audio_enc_dim) — pre-extracted
+                audio frames to prevent loss of cross-modal alignment accuracy.
 
         Returns:
             audio_embed: (B, embed_dim)
@@ -374,10 +386,9 @@ class ConflictNet(nn.Module):
         """
         # Audio path
         if precomputed_audio_embed is not None:
-            # Use pre-extracted embedding; frame-level features are unavailable
-            # in this path (FunASR does not return frame-level hidden states).
+            # Use pre-extracted embedding and frames
             audio_raw = precomputed_audio_embed
-            audio_frames = None
+            audio_frames = precomputed_audio_frames
         else:
             audio_raw = self.audio_encoder(audio, attention_mask=audio_attention_mask, return_frames=return_frames)
             if return_frames:
@@ -482,6 +493,7 @@ class ConflictNet(nn.Module):
         precomputed_audio_embed: Optional[torch.Tensor] = None,
         # Pre-extracted speaker embedding (bypasses ECAPA-TDNN inside DDP scope)
         precomputed_speaker_embed: Optional[torch.Tensor] = None,
+        precomputed_audio_frames: Optional[torch.Tensor] = None,
     ) -> ConflictNetOutput:
 
         # 1. Encode (all pure-torch — numpy preprocessing done in collate_fn)
@@ -494,6 +506,7 @@ class ConflictNet(nn.Module):
             return_tokens=need_frames,
             precomputed_audio_embed=precomputed_audio_embed,
             precomputed_speaker_embed=precomputed_speaker_embed,
+            precomputed_audio_frames=precomputed_audio_frames,
         )
 
         # 2. Cross-modal attention: audio↔text BEFORE fusion (+ optional dialogue context)

@@ -1326,9 +1326,25 @@ def _collate_core(
             b["audio"]["speaker"] if isinstance(b["audio"], dict) else torch.zeros(192) 
             for b in batch
         ])
-        audio_attention_mask = torch.ones(len(batch), 1, dtype=torch.bool)
+        
+        has_frames = any("audio_frames" in b["audio"] and b["audio"]["audio_frames"] is not None for b in batch if isinstance(b["audio"], dict))
+        if has_frames:
+            max_f = max(b["audio"]["audio_frames"].shape[0] for b in batch if isinstance(b["audio"], dict) and b["audio"].get("audio_frames") is not None)
+            D = next(b["audio"]["audio_frames"].shape[1] for b in batch if isinstance(b["audio"], dict) and b["audio"].get("audio_frames") is not None)
+            audio_frames_padded = torch.zeros(len(batch), max_f, D)
+            audio_attention_mask = torch.zeros(len(batch), max_f, dtype=torch.bool)
+            for i, b in enumerate(batch):
+                if isinstance(b["audio"], dict) and b["audio"].get("audio_frames") is not None:
+                    f = b["audio"]["audio_frames"]
+                    t = f.shape[0]
+                    audio_frames_padded[i, :t] = f
+                    audio_attention_mask[i, :t] = True
+        else:
+            audio_frames_padded = None
+            audio_attention_mask = torch.ones(len(batch), 1, dtype=torch.bool)
     else:
         speaker_padded = None
+        audio_frames_padded = None
         max_len = max(b["audio"].shape[0] for b in batch)
         audio_padded = torch.zeros(len(batch), max_len)
         audio_attention_mask = torch.zeros(len(batch), max_len, dtype=torch.bool)
@@ -1373,6 +1389,7 @@ def _collate_core(
     return {
         "audio": audio_padded,
         "speaker_embed": speaker_padded,
+        "audio_frames": audio_frames_padded,
         "is_precomputed": is_precomputed,
         "audio_attention_mask": audio_attention_mask,
         "input_ids": torch.stack([b["input_ids"] for b in batch]),

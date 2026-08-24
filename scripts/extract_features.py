@@ -82,7 +82,7 @@ def extract_features_for_files(audio_files: list[Path], output_dir: str, batch_s
         # Extract features
         with torch.no_grad(), torch.autocast(device_type="cuda" if "cuda" in device else "cpu", enabled=True):
             # Audio embed (Emotion2Vec)
-            audio_embeds = audio_encoder(audio_padded)
+            audio_embeds, audio_frames = audio_encoder(audio_padded, return_frames=True)
             # Speaker embed (ECAPA-TDNN)
             speaker_embeds = speaker_norm.encode_speaker(audio_padded)
             
@@ -92,6 +92,7 @@ def extract_features_for_files(audio_files: list[Path], output_dir: str, batch_s
             data = {
                 "audio": audio_embeds[j].cpu().clone(),
                 "speaker": speaker_embeds[j].cpu().clone(),
+                "audio_frames": audio_frames[j].cpu().clone() if audio_frames is not None else None,
             }
             torch.save(data, pt_path)
             
