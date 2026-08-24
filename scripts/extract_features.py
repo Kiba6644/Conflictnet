@@ -23,14 +23,28 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def extract_features(data_root: str, output_dir: str, batch_size: int = 16):
+def extract_features_for_files(audio_files: list[Path], output_dir: str, batch_size: int = 16):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
     out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
     
+    # Filter out macOS hidden files and those that already have a .pt file
+    pending_files = []
+    for f in audio_files:
+        if f.name.startswith("._"):
+            continue  # Skip macOS hidden metadata files
+            
+        pt_path = out_path / f.with_suffix('.pt').name
+        if not pt_path.exists():
+            pending_files.append(f)
+            
+    if not pending_files:
+        logger.info(f"All {len(audio_files)} files already extracted in {output_dir}. Skipping extraction.")
+        return
+        
     # 1. Initialize models (frozen)
-    logger.info("Initializing models...")
+    logger.info(f"Initializing models to extract {len(pending_files)} missing features...")
     from models.encoders.audio import build_audio_encoder
     from models.speaker_norm.speaker_norm import SpeakerNormalizer
     
@@ -44,23 +58,6 @@ def extract_features(data_root: str, output_dir: str, batch_size: int = 16):
     speaker_norm.eval()
     speaker_norm.to(device)
     
-    # 2. Find all audio files
-    root = Path(data_root)
-    audio_files = []
-    for ext in ["*.mp4", "*.wav"]:
-        audio_files.extend(list(root.rglob(ext)))
-        
-    logger.info(f"Found {len(audio_files)} audio files in {data_root}")
-    
-    # Filter out macOS hidden files and those that already have a .pt file
-    pending_files = []
-    for f in audio_files:
-        if f.name.startswith("._"):
-            continue  # Skip macOS hidden metadata files
-            
-        pt_path = out_path / f.with_suffix('.pt').name
-        if not pt_path.exists():
-            pending_files.append(f)
     logger.info(f"Extracting features for {len(pending_files)} files (skipped {len(audio_files) - len(pending_files)} already processed or hidden)...")
     
     # 3. Process in batches
@@ -99,6 +96,15 @@ def extract_features(data_root: str, output_dir: str, batch_size: int = 16):
             torch.save(data, pt_path)
             
     logger.info("Extraction complete!")
+
+def extract_features(data_root: str, output_dir: str, batch_size: int = 16):
+    root = Path(data_root)
+    audio_files = []
+    for ext in ["*.mp4", "*.wav"]:
+        audio_files.extend(list(root.rglob(ext)))
+        
+    logger.info(f"Found {len(audio_files)} audio files in {data_root}")
+    extract_features_for_files(audio_files, output_dir, batch_size)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

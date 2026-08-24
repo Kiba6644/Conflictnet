@@ -399,6 +399,7 @@ def main():
         logger.info("[Rank 0] In-line feature extraction complete.")
         
     if is_ddp_run:
+        import torch.distributed as dist
         dist.barrier()  # Wait for rank 0 to finish extraction before proceeding
 
     if not train_datasets:
