@@ -63,11 +63,6 @@ def extract_features(data_root: str, output_dir: str, batch_size: int = 16):
             pending_files.append(f)
     logger.info(f"Extracting features for {len(pending_files)} files (skipped {len(audio_files) - len(pending_files)} already processed or hidden)...")
     
-    # Temporarily unset CONFLICTNET_PT_DIR so load_audio doesn't warn us
-    # about missing .pt files (since we are literally creating them now)
-    if "CONFLICTNET_PT_DIR" in os.environ:
-        del os.environ["CONFLICTNET_PT_DIR"]
-    
     # 3. Process in batches
     for i in tqdm(range(0, len(pending_files), batch_size), desc="Extracting"):
         batch_files = pending_files[i:i+batch_size]

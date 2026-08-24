@@ -75,8 +75,6 @@ def load_audio(path: str, target_sr: int = SAMPLE_RATE, max_len: float = MAX_AUD
     if pt_path.exists():
         # Precomputed embedding dict, just load and return
         return torch.load(pt_path, map_location="cpu", weights_only=True)
-    elif pt_dir:
-        logger.warning(f"CONFLICTNET_PT_DIR is set, but {pt_path.name} was not found. Falling back to slow CPU audio decoding!")
 
     try:
         waveform, sr = torchaudio.load(path)
