@@ -381,8 +381,8 @@ def main():
             paths = []
             for ds in ds_list:
                 for item in ds.items:
-                    if "audio_path" in item:
-                        paths.append(Path(item["audio_path"]))
+                    if "wav_path" in item and item["wav_path"] is not None:
+                        paths.append(Path(item["wav_path"]))
             return paths
 
         logger.info("[Rank 0] Collecting audio paths for required features...")
