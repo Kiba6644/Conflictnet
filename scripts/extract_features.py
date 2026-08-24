@@ -7,8 +7,12 @@ embeddings as .pt files right next to the original audio files.
 
 import argparse
 import logging
+import sys
 import os
 from pathlib import Path
+
+# Add project root to Python path so we can import models/data
+sys.path.append(str(Path(__file__).parent.parent))
 
 import torch
 from tqdm.auto import tqdm
