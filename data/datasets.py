@@ -68,7 +68,7 @@ def load_audio(path: str, target_sr: int = SAMPLE_RATE, max_len: float = MAX_AUD
     """Load and resample audio file to target_sr, or load precomputed .pt dict if exists."""
     pt_path = Path(path).with_suffix(".pt")
     
-    pt_dir = os.environ.get("CONFLICTNET_PT_DIR")
+    pt_dir = os.environ.get("CONFLICTNET_PT_DIR", "/kaggle/working/features")
     if pt_dir and not pt_path.exists():
         pt_path = Path(pt_dir) / f"{Path(path).stem}.pt"
 

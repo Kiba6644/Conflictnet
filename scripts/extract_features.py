@@ -32,7 +32,7 @@ def extract_features(data_root: str, output_dir: str, batch_size: int = 16):
     # 1. Initialize models (frozen)
     logger.info("Initializing models...")
     from models.encoders.audio import build_audio_encoder
-    from models.alignment.speaker_norm import SpeakerNormalizer
+    from models.speaker_norm.speaker_norm import SpeakerNormalizer
     
     # We only instantiate what we need to avoid downloading text models
     audio_encoder = build_audio_encoder("emotion2vec")
