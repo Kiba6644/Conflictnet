@@ -481,6 +481,16 @@ def main():
     while True:
         trainer.train(n_epochs=args.epochs or cfg.get("epochs", 30), pretrain_epochs=args.pretrain_epochs, start_epoch=start_epoch)
 
+        if local_rank in (-1, 0):
+            logger.info("⚡ Running final evaluation on best model...")
+            trainer.load_checkpoint(Path(args.output_dir) / "best_model.safetensors")
+            final_metrics = trainer.evaluate()
+            
+            print("\n📊 FINAL DETAILED EVALUATION RESULTS:")
+            print("-" * 30)
+            for k, v in final_metrics.items():
+                print(f"{k:<15} : {v:.4f}")
+
         if args.max_retries <= 0 or args.target_f1 <= 0:
             break
 

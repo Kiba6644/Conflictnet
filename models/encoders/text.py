@@ -92,7 +92,7 @@ class DeBERTaEncoder(nn.Module):
                 task_type=TaskType.FEATURE_EXTRACTION,
                 r=r,
                 lora_alpha=alpha,
-                target_modules=["query_proj", "value_proj", "key_proj", "output"],
+                target_modules=["query_proj", "value_proj", "key_proj", "dense"],
                 lora_dropout=0.05,
                 bias="none",
             )
