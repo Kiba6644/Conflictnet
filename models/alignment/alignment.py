@@ -106,7 +106,7 @@ class CrossModalAttention(nn.Module):
         # key_padding_mask expects True for padding (ignored) elements.
         # our attention masks are True for valid elements, so we invert them.
         if text_attention_mask is not None and text_seq is not None:
-            valid_t = ~text_attention_mask
+            valid_t = ~text_attention_mask.bool()
         else:
             valid_t = torch.zeros(B, t_seq.size(1), dtype=torch.bool, device=device)
             
