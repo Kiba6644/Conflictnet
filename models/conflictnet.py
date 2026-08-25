@@ -530,8 +530,9 @@ class ConflictNet(nn.Module):
             and need_frames
             and audio_frames is not None
             and text_tokens is not None
+            and word_timestamps is not None
+            and token_word_boundaries is not None
         ):
-            assert word_timestamps is not None and token_word_boundaries is not None
             word_div_feats = self.word_divergence.forward_from_encoder_hidden(
                 audio_frame_embeds=audio_frames,
                 text_token_embeds=text_tokens,
