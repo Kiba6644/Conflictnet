@@ -632,7 +632,7 @@ class ConflictNet(nn.Module):
                     # moves it to the model device automatically via .to(device).
                     # Calling .to(audio.device) inside forward() created a
                     # temporary tensor every step (minor but wasteful).
-                    pos_weight=self.pos_weight,
+                    pos_weight=None,
                 )
                 losses.append(type_loss)
             else:

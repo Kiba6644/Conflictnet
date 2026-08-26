@@ -271,9 +271,10 @@ class ContextGatedContrastiveLoss(nn.Module):
         conflict_sep_loss = (sim_raw * 0.0).sum()
         if conflict_labels is not None and conflict_labels.sum() > 0:
             conflict_mask = conflict_labels.bool()
-            apply_sep = conflict_mask
             if sarcasm_mask is not None:
-                apply_sep = conflict_mask & ~sarcasm_mask   # prosodic-only conflict
+                apply_sep = conflict_mask & sarcasm_mask   # ONLY sarcasm pairs should be pushed apart
+            else:
+                apply_sep = torch.zeros_like(conflict_mask)
             if apply_sep.any():
                 paired_sim = torch.diagonal(sim_raw)  # (B,) — un-scaled cosine sim
                 # Conflict pairs should have LOW cosine similarity (audio ≠ text).

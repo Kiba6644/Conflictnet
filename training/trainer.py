@@ -156,8 +156,8 @@ class ConflictNetTrainer:
         )
 
         from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
-        # Create EMA model with decay=0.9999
-        self.ema_model = AveragedModel(self.model, multi_avg_fn=get_ema_multi_avg_fn(0.9999))
+        # Create EMA model with decay=0.999
+        self.ema_model = AveragedModel(self.model, multi_avg_fn=get_ema_multi_avg_fn(0.999))
 
     def _setup_optimizer(self):
         lr = self.cfg.get("lr", 5e-5)
@@ -534,8 +534,8 @@ class ConflictNetTrainer:
             # Using binary_f1 here was incorrect: it collapsed the multi-class signal
             # to a single conflict/non-conflict decision and ignored per-emotion class performance.
             from sklearn.metrics import f1_score as _f1
-            f1_macro = _f1(labels, (probs >= 0.5).astype(int), average="macro", zero_division=0)
-            f1_weighted = _f1(labels, (probs >= 0.5).astype(int), average="weighted", zero_division=0)
+            f1_macro = _f1(labels, (probs >= 0.35).astype(int), average="macro", zero_division=0)
+            f1_weighted = _f1(labels, (probs >= 0.35).astype(int), average="weighted", zero_division=0)
 
             metrics = {
                 "val/f1_binary": float(f1_binary),
