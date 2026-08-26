@@ -823,7 +823,11 @@ class ConflictNetTrainer:
 
             result = _load_model_state(model_state)
             if result.missing_keys:
-                logger.warning(f"Missing keys in checkpoint: {result.missing_keys}")
+                trainable_missing = [k for k in result.missing_keys if any(k.startswith(name) for name, p in model_for_state.named_parameters() if p.requires_grad)]
+                if trainable_missing:
+                    logger.warning(f"CRITICAL: Missing TRAINABLE keys in checkpoint: {trainable_missing}")
+                else:
+                    logger.info(f"Missing keys are all frozen parameters (expected for partial checkpoints).")
             if result.unexpected_keys:
                 logger.warning(f"Unexpected keys in checkpoint: {result.unexpected_keys}")
 
@@ -856,7 +860,11 @@ class ConflictNetTrainer:
             model_state = extract_model_state(ckpt)
             result = _load_model_state(model_state)
             if result.missing_keys:
-                logger.warning(f"Missing keys in checkpoint: {result.missing_keys}")
+                trainable_missing = [k for k in result.missing_keys if any(k.startswith(name) for name, p in model_for_state.named_parameters() if p.requires_grad)]
+                if trainable_missing:
+                    logger.warning(f"CRITICAL: Missing TRAINABLE keys in checkpoint: {trainable_missing}")
+                else:
+                    logger.info(f"Missing keys are all frozen parameters (expected for partial checkpoints).")
             if result.unexpected_keys:
                 logger.warning(f"Unexpected keys in checkpoint: {result.unexpected_keys}")
 

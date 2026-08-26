@@ -297,11 +297,21 @@ def main():
 
     # Load pre-computed prosody z-scores if available
     prosody_lookup = None
-    if args.prosody_stats:
-        prosody_path = Path(args.prosody_stats)
+    prosody_path = args.prosody_stats
+    if not prosody_path:
+        default_prosody = repo_root / "prosody_stats.zscores.json"
+        if default_prosody.exists():
+            prosody_path = str(default_prosody)
+            logger.info(f"Auto-detected default prosody stats: {prosody_path}")
+
+    if prosody_path:
+        prosody_path = Path(prosody_path)
         zscores_p = prosody_path.parent / f"{prosody_path.stem}.zscores.json"
         if not zscores_p.exists():
             zscores_p = prosody_path.with_suffix(".zscores.json")
+        if not zscores_p.exists() and prosody_path.name.endswith(".json"):
+            zscores_p = prosody_path
+            
         if zscores_p.exists():
             try:
                 with open(zscores_p) as f:

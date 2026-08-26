@@ -486,12 +486,28 @@ class MUStARDDataset(Dataset):
             if wav_path is None:
                 logger.warning(f"[MUStARD++] No wav found for key={key}, searched in {wav_search_root}")
                 continue
+                
+            context = sample.get("context", [])
+            for i, ctx_str in enumerate(context):
+                all_samples.append({
+                    "wav_path": str(wav_path),
+                    "text": ctx_str,
+                    "sarcasm": 0,
+                    "speaker_id": sample.get("speaker", "unknown"),
+                    "dataset_name": "mustard",
+                    "conversation_id": key,
+                    "turn_index": i,
+                    "is_context": True,
+                })
+                
             all_samples.append({
                 "wav_path": str(wav_path),
                 "text": sample.get("utterance", ""),
                 "sarcasm": int(sample.get("sarcasm", 0)),
                 "speaker_id": sample.get("speaker", "unknown"),
                 "dataset_name": "mustard",
+                "conversation_id": key,
+                "turn_index": len(context),
             })
 
         # Speaker-stratified split: group by speaker, assign whole speakers to train/val
@@ -519,6 +535,16 @@ class MUStARDDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         item = self.items[idx]
         audio = load_audio(item["wav_path"])
+        
+        if item.get("is_context", False):
+            if isinstance(audio, dict):
+                audio = {
+                    "audio": torch.zeros_like(audio["audio"]),
+                    "speaker": torch.zeros_like(audio.get("speaker", torch.zeros(192))),
+                    "audio_frames": torch.zeros_like(audio["audio_frames"]) if audio.get("audio_frames") is not None else None
+                }
+            elif isinstance(audio, torch.Tensor):
+                audio = torch.zeros_like(audio)
         input_ids, attention_mask = tokenize(item["text"], self.tokenizer)
         sarcasm = item["sarcasm"]
         text = item["text"]
