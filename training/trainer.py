@@ -534,8 +534,8 @@ class ConflictNetTrainer:
             # Using binary_f1 here was incorrect: it collapsed the multi-class signal
             # to a single conflict/non-conflict decision and ignored per-emotion class performance.
             from sklearn.metrics import f1_score as _f1
-            f1_macro = _f1(labels, (probs >= 0.35).astype(int), average="macro", zero_division=0)
-            f1_weighted = _f1(labels, (probs >= 0.35).astype(int), average="weighted", zero_division=0)
+            f1_macro = _f1(labels, (probs >= 0.5).astype(int), average="macro", zero_division=0)
+            f1_weighted = _f1(labels, (probs >= 0.5).astype(int), average="weighted", zero_division=0)
 
             metrics = {
                 "val/f1_binary": float(f1_binary),
