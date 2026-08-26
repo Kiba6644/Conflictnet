@@ -81,10 +81,16 @@ def parse_args(argv=None):
                    help="Cap MELD train split to this many samples (stratified)")
     p.add_argument("--meld_max_val_samples", type=int, default=None,
                    help="Cap MELD val split to this many samples (stratified)")
+    p.add_argument("--meld_textgrid_root", type=str, default=None,
+                   help="Path to directory containing MFA TextGrid files for MELD word alignment")
+    p.add_argument("--mustard_textgrid_root", type=str, default=None,
+                   help="Path to directory containing MFA TextGrid files for MUStARD word alignment")
     p.add_argument("--musan_path", type=str, default=None, help="MUSAN corpus for noise augmentation")
     p.add_argument("--output_dir", type=str, default="checkpoints")
-    p.add_argument("--audio_encoder", type=str, default="emotion2vec",
+    p.add_argument("--audio_encoder", type=str, default="wavlm_weighted",
                    choices=["emotion2vec", "wavlm", "wavlm_weighted", "wav2vec2", "whisper", "dual"])
+    p.add_argument("--gradient_checkpointing", action="store_true",
+                   help="Enable gradient checkpointing on WavLM to reduce VRAM usage")
     p.add_argument("--audio_encoder_path", type=str, default=None,
                    help="Path to local audio encoder directory to bypass ModelScope")
     p.add_argument("--text_encoder_path", type=str, default=None,
@@ -108,7 +114,9 @@ def parse_args(argv=None):
     p.add_argument("--no_baseline_subtract", action="store_true",
                    help="Disable baseline-subtract prosody normalisation (use z-score instead)")
     p.add_argument("--no_word_divergence", action="store_true")
-    p.add_argument("--lora_r", type=int, default=16)
+    p.add_argument("--lora_r", type=int, default=32)
+    p.add_argument("--lora_alpha", type=int, default=32,
+                   help="LoRA alpha scaling (recommended: equal to lora_r for scaling=1.0)")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--gradient_accumulation_steps", type=int, default=1)
     p.add_argument("--early_stop_patience", type=int, default=10)
@@ -189,7 +197,9 @@ def main():
             use_baseline_subtract=not args.no_baseline_subtract,
             use_word_divergence=not args.no_word_divergence,
             lora_r=args.lora_r,
+            lora_alpha=args.lora_alpha,
             label_smoothing=args.label_smoothing,
+            gradient_checkpointing=args.gradient_checkpointing,
         )
 
     is_ddp_run = local_rank != -1
@@ -350,6 +360,8 @@ def main():
     if args.mustard_root:
         logger.info(f"[Rank {local_rank}] Loading MUStARD dataset...")
         mustard_kwargs = {}
+        if args.mustard_textgrid_root:
+            mustard_kwargs["textgrid_root"] = args.mustard_textgrid_root
         if args.tokenizer_path:
             mustard_kwargs["tokenizer_name"] = args.tokenizer_path
             
@@ -381,6 +393,9 @@ def main():
         
         meld_train_kwargs = {"max_samples": train_max} if train_max else {}
         meld_val_kwargs = {"max_samples": val_max} if val_max else {}
+        if args.meld_textgrid_root:
+            meld_train_kwargs["textgrid_root"] = args.meld_textgrid_root
+            meld_val_kwargs["textgrid_root"] = args.meld_textgrid_root
         
         if args.tokenizer_path:
             meld_train_kwargs["tokenizer_name"] = args.tokenizer_path

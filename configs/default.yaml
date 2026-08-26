@@ -1,5 +1,5 @@
 # Model
-audio_encoder: emotion2vec  # emotion2vec | wavlm | wav2vec2
+audio_encoder: wavlm_weighted  # emotion2vec | wavlm | wavlm_weighted | wav2vec2
 text_encoder: deberta-v3-large
 embed_dim: 256
 encoder_dim: 768
@@ -51,7 +51,7 @@ training:
     warmup_epochs: 5
   lora:
     enabled: true
-    r: 16
+    r: 32
     alpha: 32
   gradient_accumulation_steps: 1
   early_stop_patience: 10

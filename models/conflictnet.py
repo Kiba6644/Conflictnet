@@ -220,10 +220,11 @@ class ConflictNet(nn.Module):
         use_cross_attn_injection: bool = True,
         use_speaker_adaptive_threshold: bool = True,
         use_baseline_subtract: bool = True,
-        lora_r: int = 16,
+        lora_r: int = 32,
         lora_alpha: int = 32,
         label_smoothing: float = 0.05,  # aligned with CLI --label_smoothing default
         sarcasm_pos_weight: float = 8.0,
+        gradient_checkpointing: bool = False,
     ):
         super().__init__()
         self.embed_dim = embed_dim
@@ -252,7 +253,10 @@ class ConflictNet(nn.Module):
         self.register_buffer("pos_weight", pos_w)
 
         # 1. Encoders
-        self.audio_encoder = build_audio_encoder(audio_encoder_name)
+        self.audio_encoder = build_audio_encoder(
+            audio_encoder_name,
+            gradient_checkpointing=gradient_checkpointing
+        )
         self.text_encoder = DeBERTaEncoder(
             use_lora=(lora_r > 0),
             lora_r=lora_r,
