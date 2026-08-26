@@ -351,13 +351,20 @@ class Emotion2VecEncoder(nn.Module):
         self._backend = "funasr"
         logger.info(f"[Emotion2Vec] funasr backend: {self.model_name} on {device_str}")
 
-    def _forward_funasr(self, audio):
+    def _forward_funasr(self, audio, attention_mask=None):
         audio_np = audio.cpu().numpy()
+        
+        if attention_mask is not None:
+            lengths = attention_mask.sum(dim=1).cpu().numpy().astype(int)
+        else:
+            lengths = [audio_np.shape[1]] * audio_np.shape[0]
+            
         pooled_results = []
         frame_results = []
         for i in range(audio_np.shape[0]):
+            valid_audio = audio_np[i, :lengths[i]]
             emb = self._funasr_wrapper[0].generate(
-                input=audio_np[i], 
+                input=valid_audio, 
                 output_dir=None,  # Prevent DDP file I/O race conditions
                 disable_pbar=True,
                 disable_log=True
@@ -389,7 +396,7 @@ class Emotion2VecEncoder(nn.Module):
 
     def forward(self, audio, attention_mask=None, return_frames=False):
         if self._backend == "funasr":
-            pooled, frames = self._forward_funasr(audio)
+            pooled, frames = self._forward_funasr(audio, attention_mask=attention_mask)
             if return_frames:
                 return pooled, frames
             return pooled

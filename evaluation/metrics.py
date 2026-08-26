@@ -59,8 +59,9 @@ def compute_all_metrics(
     # Binary predictions via threshold
     preds_type = (probs_type >= type_threshold).astype(int)
 
-    # Macro F1 across types
+    # F1 across types
     metrics["macro_f1"] = f1_score(labels_type, preds_type, average="macro", zero_division=0)
+    metrics["weighted_f1"] = f1_score(labels_type, preds_type, average="weighted", zero_division=0)
 
     # Per-type metrics
     for i, name in enumerate(type_names[:n_types]):

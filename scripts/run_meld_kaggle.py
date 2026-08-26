@@ -244,6 +244,14 @@ def download_meld(meld_root: Path, explicit_mount: Optional[str] = None) -> Path
     run(["tar", "-xzf", str(tar_path), "-C", str(target_root), "--strip-components=1"])
     if tar_path.exists():
         tar_path.unlink()
+        
+    # Unpack inner tar archives (train.tar.gz, dev.tar.gz, test.tar.gz)
+    for tar_name in ["train.tar.gz", "dev.tar.gz", "test.tar.gz"]:
+        inner_tar = target_root / tar_name
+        if inner_tar.exists():
+            print(f"[MELD] 📦 Unpacking {tar_name} into {target_root} ...", flush=True)
+            run(["tar", "-xzf", str(inner_tar), "-C", str(target_root)])
+            inner_tar.unlink()  # Save space
 
     print("[MELD] ✅ Dataset ready.")
     return target_root
@@ -274,7 +282,7 @@ def main():
     p.add_argument("--meld_mount", type=str, default=None,
                    help="Explicit path to mounted MELD dataset (e.g. /kaggle/input/notebooks/nith27/meld-dataset/MELD.Raw)")
     p.add_argument("--output_dir", type=str, default="/kaggle/working/output_meld")
-    p.add_argument("--audio_encoder", type=str, default="wavlm_weighted",
+    p.add_argument("--audio_encoder", type=str, default="emotion2vec",
                    choices=["emotion2vec", "wavlm", "wavlm_weighted", "wav2vec2"])
     p.add_argument("--no_eval", action="store_true",
                    help="Skip evaluation after training")

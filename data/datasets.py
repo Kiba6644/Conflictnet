@@ -88,9 +88,26 @@ def load_audio(path: str, target_sr: int = SAMPLE_RATE, max_len: float = MAX_AUD
             else:
                 waveform = waveform.t()
         except Exception as e:
-            logger.warning(f"Failed to load audio from {path}: {e}, returning dummy audio tensor")
-            waveform = torch.zeros(1, int(target_sr * max_len))
-            sr = target_sr
+            # Fallback to ffmpeg for .mp4 and other video files
+            try:
+                import subprocess
+                import tempfile
+                with tempfile.NamedTemporaryFile(suffix=".wav") as temp_wav:
+                    subprocess.run(
+                        ["ffmpeg", "-y", "-i", path, "-vn", "-acodec", "pcm_s16le", "-ar", str(target_sr), "-ac", "1", temp_wav.name],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
+                    )
+                    import soundfile as sf
+                    data, sr = sf.read(temp_wav.name)
+                    waveform = torch.from_numpy(data).float()
+                    if waveform.ndim == 1:
+                        waveform = waveform.unsqueeze(0)
+                    else:
+                        waveform = waveform.t()
+            except Exception as ffmpeg_e:
+                logger.warning(f"Failed to load audio from {path}: {e}, ffmpeg fallback failed: {ffmpeg_e}, returning dummy audio tensor")
+                waveform = torch.zeros(1, int(target_sr * max_len))
+                sr = target_sr
 
     if waveform.ndim == 1:
         waveform = waveform.unsqueeze(0)
@@ -828,20 +845,48 @@ class MELDDataset(Dataset):
                     dialogues[d_id] = []
                 dialogues[d_id].append(item)
 
-            # Deterministic shuffle of dialogue IDs
-            dialogue_ids = sorted(list(dialogues.keys()))
+            # Sort turns within each dialogue
+            for d_id in dialogues:
+                dialogues[d_id] = sorted(dialogues[d_id], key=lambda x: x["turn_index"])
+
+            # Split dialogues into buckets based on whether they contain conflict
+            conflict_dialogues = []
+            neutral_dialogues = []
+            for d_id, d_items in dialogues.items():
+                if any(x["conflict_binary"] == 1 for x in d_items):
+                    conflict_dialogues.append(d_id)
+                else:
+                    neutral_dialogues.append(d_id)
+
+            # Deterministic shuffle
             rng = random.Random(42)
-            rng.shuffle(dialogue_ids)
+            conflict_dialogues = sorted(conflict_dialogues)
+            neutral_dialogues = sorted(neutral_dialogues)
+            rng.shuffle(conflict_dialogues)
+            rng.shuffle(neutral_dialogues)
 
             subsampled_items = []
             n_conflict = 0
             n_non_conflict = 0
 
-            for d_id in dialogue_ids:
-                if len(subsampled_items) >= self.max_samples:
+            # Target 20% conflict ratio (stratified 80/20)
+            target_conflict_ratio = 0.20
+
+            while len(subsampled_items) < self.max_samples and (conflict_dialogues or neutral_dialogues):
+                current_total = n_conflict + n_non_conflict
+                current_ratio = (n_conflict / current_total) if current_total > 0 else 0.0
+
+                # Pick from conflict bucket if we are below target ratio and it's not empty
+                if current_ratio < target_conflict_ratio and conflict_dialogues:
+                    d_id = conflict_dialogues.pop(0)
+                elif neutral_dialogues:
+                    d_id = neutral_dialogues.pop(0)
+                elif conflict_dialogues:
+                    d_id = conflict_dialogues.pop(0)
+                else:
                     break
-                # Ensure turns within the dialogue are in chronological order
-                d_items = sorted(dialogues[d_id], key=lambda x: x["turn_index"])
+
+                d_items = dialogues[d_id]
                 subsampled_items.extend(d_items)
                 
                 for x in d_items:

@@ -530,12 +530,12 @@ class ConflictNetTrainer:
                         pass
             macro_ap = float(np.mean(per_class_ap)) if per_class_ap else 0.0
 
-            # Weighted (macro) F1 over all classes — used for best-checkpoint
-            # and early-stopping.  Using binary_f1 here was incorrect: it
-            # collapsed the multi-class signal to a single conflict/non-conflict
-            # decision and ignored per-emotion class performance.
+            # Weighted and Macro F1 over all classes.
+            # Using binary_f1 here was incorrect: it collapsed the multi-class signal
+            # to a single conflict/non-conflict decision and ignored per-emotion class performance.
             from sklearn.metrics import f1_score as _f1
             f1_macro = _f1(labels, (probs >= 0.5).astype(int), average="macro", zero_division=0)
+            f1_weighted = _f1(labels, (probs >= 0.5).astype(int), average="weighted", zero_division=0)
 
             metrics = {
                 "val/f1_binary": float(f1_binary),
@@ -543,9 +543,7 @@ class ConflictNetTrainer:
                 "val/macro_ap": float(macro_ap),
                 "val/f1_macro": float(f1_macro),
                 # val/f1_weighted drives best-checkpoint and early-stopping logic.
-                # BUG FIX: was incorrectly set to f1_binary (binary conflict F1)
-                # which ignores per-emotion class accuracy. Now uses macro F1.
-                "val/f1_weighted": float(f1_macro),
+                "val/f1_weighted": float(f1_weighted),
             }
             is_ddp = torch.distributed.is_initialized() and int(os.environ.get("LOCAL_RANK", -1)) != -1
             if is_ddp:

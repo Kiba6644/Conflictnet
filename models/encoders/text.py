@@ -34,6 +34,17 @@ class DeBERTaEncoder(nn.Module):
         super().__init__()
         local_path = os.environ.get("CONFLICTNET_DEBERTA_PATH")
         if local_path:
+            if not os.path.exists(local_path):
+                if "/datasets/nith27/" in local_path:
+                    fixed_path = local_path.replace("/datasets/nith27/", "/")
+                    if os.path.exists(fixed_path):
+                        local_path = fixed_path
+                        
+            if not os.path.exists(local_path):
+                raise FileNotFoundError(
+                    f"[DeBERTa] The provided local path DOES NOT EXIST: {local_path}\n"
+                    f"Please check your --text_encoder_path argument."
+                )
             model_name = local_path
             logger.info(f"[DeBERTa] Using local path: {local_path}")
         self.output_dim = embed_dim

@@ -156,12 +156,22 @@ def main():
                 k: v.to(args.device, non_blocking=True) if isinstance(v, torch.Tensor) else v
                 for k, v in batch.items()
             }
+            precomputed_audio_embed = None
+            precomputed_speaker_embed = None
+            if batch.get("is_precomputed", False):
+                precomputed_audio_embed = batch_gpu["audio"]
+                if batch_gpu.get("speaker_embed") is not None:
+                    precomputed_speaker_embed = batch_gpu["speaker_embed"]
+            
             out = model(
                 audio=batch_gpu["audio"],
                 input_ids=batch_gpu["input_ids"],
                 attention_mask=batch_gpu["attention_mask"],
                 audio_attention_mask=batch_gpu.get("audio_attention_mask"),
                 prosody_z=batch_gpu.get("prosody_z"),
+                precomputed_audio_embed=precomputed_audio_embed,
+                precomputed_speaker_embed=precomputed_speaker_embed,
+                precomputed_audio_frames=batch_gpu.get("audio_frames"),
             )
             all_probs.append(out.probs_type.cpu().numpy())
             all_labels.append(batch["conflict_type_labels"].numpy())

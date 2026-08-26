@@ -405,7 +405,7 @@ def main():
         
         from scripts.extract_features import extract_features_for_files
         logger.info(f"[Rank 0] Starting in-line feature extraction into {feature_dir}...")
-        extract_features_for_files(required_audio_files, feature_dir, batch_size=args.batch_size or 16)
+        extract_features_for_files(required_audio_files, feature_dir, batch_size=args.batch_size or 16, audio_encoder_name=args.audio_encoder)
         logger.info("[Rank 0] In-line feature extraction complete.")
         
     if is_ddp_run:
