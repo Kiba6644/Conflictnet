@@ -55,7 +55,7 @@ class CrossModalAttention(nn.Module):
         super().__init__()
         self.embed_dim = embed_dim
         self.num_layers = num_layers
-        self.modal_drop_p = 0.15
+        self.modal_drop_p = 0.05
 
         self.audio_layers = nn.ModuleList([
             nn.ModuleDict({
@@ -196,7 +196,7 @@ class ContextGatedContrastiveLoss(nn.Module):
     def __init__(
         self,
         embed_dim: int = 256,
-        base_temperature: float = 0.07,
+        base_temperature: float = 0.15,
         context_gate_dim: int = 64,
         conflict_margin: float = 0.5,
     ):
