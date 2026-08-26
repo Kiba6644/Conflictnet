@@ -261,6 +261,7 @@ class ConflictNet(nn.Module):
             use_lora=(lora_r > 0),
             lora_r=lora_r,
             lora_alpha=lora_alpha,
+            gradient_checkpointing=gradient_checkpointing,
         )
 
         audio_enc_dim = self.audio_encoder.output_dim

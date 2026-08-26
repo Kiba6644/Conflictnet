@@ -493,4 +493,9 @@ def build_audio_encoder(name: str = "emotion2vec", **kwargs) -> nn.Module:
     }
     if name not in encoders:
         raise ValueError(f"Unknown audio encoder: {name}. Choose from {list(encoders.keys())}")
+    # Only WavLM encoders support gradient_checkpointing; strip the kwarg
+    # for all others to avoid a TypeError at construction time.
+    _wavlm_encoders = {"wavlm", "wavlm_weighted"}
+    if name not in _wavlm_encoders:
+        kwargs.pop("gradient_checkpointing", None)
     return encoders[name](**kwargs)
