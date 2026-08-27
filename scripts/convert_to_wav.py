@@ -17,7 +17,7 @@ def convert_dataset(src_dir: str, dst_dir: str):
         logger.error(f"Source directory {src_dir} does not exist!")
         return
 
-    splits = ["train", "val", "test"]
+    splits = ["train", "val", "dev", "test"]
     converted = 0
     
     for split in splits:
