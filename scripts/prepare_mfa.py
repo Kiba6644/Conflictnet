@@ -43,14 +43,18 @@ def prepare_subset(split, root, max_samples, output_dir):
         
         # Copy or convert file
         if wav_path.exists():
-            import subprocess
             if wav_path.suffix.lower() == ".mp4":
-                cmd = [
-                    "ffmpeg", "-y", "-i", str(wav_path), 
-                    "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", 
-                    str(target_wav)
-                ]
-                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                try:
+                    import torchaudio
+                    waveform, sr = torchaudio.load(str(wav_path))
+                    if sr != 16000:
+                        import torchaudio.functional as F
+                        waveform = F.resample(waveform, sr, 16000)
+                    if waveform.shape[0] > 1:
+                        waveform = waveform.mean(dim=0, keepdim=True)
+                    torchaudio.save(str(target_wav), waveform, 16000)
+                except Exception as e:
+                    print(f"Error converting {wav_path}: {e}")
             else:
                 shutil.copy2(wav_path, target_wav)
         else:
