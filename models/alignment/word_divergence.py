@@ -308,7 +308,7 @@ class WordLevelDivergence(nn.Module):
             wt = torch.stack(word_text)
             n_words_audio, n_words_text = wa.size(0), wt.size(0)
             if n_words_audio != n_words_text:
-                logger.warning(
+                logger.debug(
                     "Word count mismatch: audio_words=%d, text_words=%d. Truncating to %d.",
                     n_words_audio, n_words_text, min(n_words_audio, n_words_text),
                 )
