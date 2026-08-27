@@ -17,30 +17,45 @@ def convert_dataset(src_dir: str, dst_dir: str):
         logger.error(f"Source directory {src_dir} does not exist!")
         return
 
-    splits = ["train", "val", "dev", "test"]
+    # Hardcoded exact paths as seen in Kaggle UI and datasets.py (Zero recursive searching)
+    exact_subfolders = [
+        Path("train/train_splits"),
+        Path("dev/dev_splits_complete"),
+        Path("test/output_repeated_splits_test")
+    ]
+    
     converted = 0
     
-    logger.info(f"Scanning {src_path} recursively for .mp4 files...")
-    mp4_files = list(src_path.rglob("*.mp4"))
-    logger.info(f"Found {len(mp4_files)} .mp4 files to convert.")
-    
-    for mp4 in mp4_files:
-        rel_path = mp4.relative_to(src_path)
-        target_wav = dst_path / rel_path.with_suffix(".wav")
+    for subfolder in exact_subfolders:
+        s_src = src_path / subfolder
+        s_dst = dst_path / subfolder
         
-        if not target_wav.exists():
-            target_wav.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                wf, sr = torchaudio.load(str(mp4))
-                if sr != 16000:
-                    wf = F.resample(wf, sr, 16000)
-                # Convert stereo to mono
-                if wf.shape[0] > 1:
-                    wf = wf.mean(dim=0, keepdim=True)
-                torchaudio.save(str(target_wav), wf, 16000)
-                converted += 1
-            except Exception as e:
-                logger.warning(f"Failed to convert {mp4}: {e}")
+        if not s_src.exists():
+            logger.warning(f"Skipping {s_src} (not found)")
+            continue
+            
+        s_dst.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Scanning exact folder {s_src} for .mp4 files...")
+        
+        # Simple glob only looks at the exact folder level, no slow recursive digging
+        mp4_files = list(s_src.glob("*.mp4"))
+        logger.info(f"Found {len(mp4_files)} .mp4 files in {subfolder}")
+        
+        for mp4 in mp4_files:
+            target_wav = s_dst / mp4.with_suffix(".wav").name
+            
+            if not target_wav.exists():
+                try:
+                    wf, sr = torchaudio.load(str(mp4))
+                    if sr != 16000:
+                        wf = F.resample(wf, sr, 16000)
+                    # Convert stereo to mono
+                    if wf.shape[0] > 1:
+                        wf = wf.mean(dim=0, keepdim=True)
+                    torchaudio.save(str(target_wav), wf, 16000)
+                    converted += 1
+                except Exception as e:
+                    logger.warning(f"Failed to convert {mp4}: {e}")
             
     logger.info(f"Successfully converted {converted} new audio files to {dst_dir}")
 
