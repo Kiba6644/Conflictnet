@@ -45,25 +45,25 @@ def convert_dataset(src_dir: str, dst_dir: str, max_train: int, max_val: int):
     converted = 0
     os.environ["CONFLICTNET_PT_DIR"] = ""  # Ensure load_audio returns raw waveforms, not cached dicts
     
+    import subprocess
+    
     # Progress bar!
     for mp4 in tqdm(files_to_convert, desc="Converting MP4 to WAV"):
-        # Preserve the exact relative directory structure (e.g. train/train_splits/)
         rel_path = mp4.relative_to(src_path)
         target_wav = dst_path / rel_path.with_suffix(".wav")
         
         if not target_wav.exists():
             target_wav.parent.mkdir(parents=True, exist_ok=True)
             try:
-                # Use ConflictNet's robust 3-tier fallback loader (torchaudio -> soundfile -> ffmpeg)
-                # because standard torchaudio fails on 80% of Kaggle's MELD .mp4 files!
-                wf = load_audio(str(mp4), target_sr=16000)
-                
-                # Convert stereo to mono if needed
-                if isinstance(wf, torch.Tensor):
-                    if wf.shape[0] > 1:
-                        wf = wf.mean(dim=0, keepdim=True)
-                    torchaudio.save(str(target_wav), wf, 16000)
-                    converted += 1
+                # Kaggle's torchaudio native MP4 decoder segfaults or silently returns empty tensors!
+                # We use ffmpeg directly in a subprocess to flawlessly rip the audio.
+                subprocess.run(
+                    ["ffmpeg", "-y", "-i", str(mp4), "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", str(target_wav)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=True
+                )
+                converted += 1
             except Exception as e:
                 logger.warning(f"\nFailed to convert {mp4}: {e}")
             
