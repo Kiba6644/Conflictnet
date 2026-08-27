@@ -66,15 +66,16 @@ CONFLICT_EMOTIONS = {"ang", "fru"}  # used for binary conflict label in IEMOCAP
 
 def load_audio(path: str, target_sr: int = SAMPLE_RATE, max_len: float = MAX_AUDIO_LEN) -> torch.Tensor | Dict[str, torch.Tensor]:
     """Load and resample audio file to target_sr, or load precomputed .pt dict if exists."""
-    pt_path = Path(path).with_suffix(".pt")
-    
-    pt_dir = os.environ.get("CONFLICTNET_PT_DIR", "/kaggle/working/features")
-    if pt_dir and not pt_path.exists():
-        pt_path = Path(pt_dir) / f"{Path(path).stem}.pt"
+    # Only use precomputed .pt features if CONFLICTNET_PT_DIR is explicitly provided
+    pt_dir = os.environ.get("CONFLICTNET_PT_DIR", "")
+    if pt_dir:
+        pt_path = Path(path).with_suffix(".pt")
+        if not pt_path.exists():
+            pt_path = Path(pt_dir) / f"{Path(path).stem}.pt"
 
-    if pt_path.exists():
-        # Precomputed embedding dict, just load and return
-        return torch.load(pt_path, map_location="cpu", weights_only=True)
+        if pt_path.exists():
+            # Precomputed embedding dict, just load and return
+            return torch.load(pt_path, map_location="cpu", weights_only=True)
 
     try:
         waveform, sr = torchaudio.load(path)

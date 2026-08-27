@@ -423,32 +423,35 @@ def main():
     logger.info(f"[Rank {local_rank}] Finished loading all dataset components.")
 
     # In-line Feature Extraction for actual used files
-    # Only Rank 0 should do the extraction so multiple ranks don't write to the same files concurrently.
-    if local_rank in [-1, 0]:
-        def collect_paths(ds_list):
-            paths = []
-            for ds in ds_list:
-                for item in ds.items:
-                    if "wav_path" in item and item["wav_path"] is not None:
-                        paths.append(Path(item["wav_path"]))
-            return paths
+    # Only perform feature pre-extraction if we are using frozen features (unfreeze_audio_layers == 0)
+    # and CONFLICTNET_PT_DIR is explicitly set. If unfreeze_audio_layers > 0, we MUST train end-to-end on raw audio!
+    pt_dir = os.environ.get("CONFLICTNET_PT_DIR", "")
+    if args.unfreeze_audio_layers == 0 and pt_dir:
+        if local_rank in [-1, 0]:
+            def collect_paths(ds_list):
+                paths = []
+                for ds in ds_list:
+                    for item in ds.items:
+                        if "wav_path" in item and item["wav_path"] is not None:
+                            paths.append(Path(item["wav_path"]))
+                return paths
 
-        logger.info("[Rank 0] Collecting audio paths for required features...")
-        required_audio_files = collect_paths(train_datasets) + collect_paths(val_datasets)
-        # Deduplicate
-        required_audio_files = list(set(required_audio_files))
-        
-        # We need an output directory for features, default to /kaggle/working/features
-        feature_dir = os.environ.get("CONFLICTNET_PT_DIR", "/kaggle/working/features")
-        
-        from scripts.extract_features import extract_features_for_files
-        logger.info(f"[Rank 0] Starting in-line feature extraction into {feature_dir}...")
-        extract_features_for_files(required_audio_files, feature_dir, batch_size=args.batch_size or 16, audio_encoder_name=args.audio_encoder)
-        logger.info("[Rank 0] In-line feature extraction complete.")
+            logger.info("[Rank 0] Collecting audio paths for required features...")
+            required_audio_files = collect_paths(train_datasets) + collect_paths(val_datasets)
+            required_audio_files = list(set(required_audio_files))
+            
+            from scripts.extract_features import extract_features_for_files
+            logger.info(f"[Rank 0] Starting in-line feature extraction into {pt_dir}...")
+            extract_features_for_files(required_audio_files, pt_dir, batch_size=args.batch_size or 16, audio_encoder_name=args.audio_encoder)
+            logger.info("[Rank 0] In-line feature extraction complete.")
+    else:
+        # Clear CONFLICTNET_PT_DIR to ensure load_audio loads raw audio waveforms for end-to-end WavLM training
+        os.environ["CONFLICTNET_PT_DIR"] = ""
+        logger.info(f"[Rank {local_rank}] End-to-end audio training active (unfreeze_audio_layers={args.unfreeze_audio_layers}). Raw waveforms will be passed directly to {args.audio_encoder}.")
         
     if is_ddp_run:
         import torch.distributed as dist
-        dist.barrier()  # Wait for rank 0 to finish extraction before proceeding
+        dist.barrier()  # Wait for rank 0 to finish check before proceeding
 
     if not train_datasets:
         raise ValueError("Provide at least one of --iemocap_root, --mustard_root, --cremad_root, or --meld_root")
