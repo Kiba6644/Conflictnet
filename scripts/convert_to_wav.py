@@ -11,7 +11,7 @@ from tqdm.auto import tqdm
 
 # Add project root to python path so we can import datasets.py
 sys.path.append(str(Path(__file__).parent.parent))
-from data.datasets import MELDDataset
+from data.datasets import MELDDataset, load_audio
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -43,6 +43,7 @@ def convert_dataset(src_dir: str, dst_dir: str, max_train: int, max_val: int):
     logger.info(f"Subset selected! Found {len(files_to_convert)} unique files to convert.")
     
     converted = 0
+    os.environ["CONFLICTNET_PT_DIR"] = ""  # Ensure load_audio returns raw waveforms, not cached dicts
     
     # Progress bar!
     for mp4 in tqdm(files_to_convert, desc="Converting MP4 to WAV"):
@@ -53,14 +54,16 @@ def convert_dataset(src_dir: str, dst_dir: str, max_train: int, max_val: int):
         if not target_wav.exists():
             target_wav.parent.mkdir(parents=True, exist_ok=True)
             try:
-                wf, sr = torchaudio.load(str(mp4))
-                if sr != 16000:
-                    wf = F.resample(wf, sr, 16000)
-                # Convert stereo to mono
-                if wf.shape[0] > 1:
-                    wf = wf.mean(dim=0, keepdim=True)
-                torchaudio.save(str(target_wav), wf, 16000)
-                converted += 1
+                # Use ConflictNet's robust 3-tier fallback loader (torchaudio -> soundfile -> ffmpeg)
+                # because standard torchaudio fails on 80% of Kaggle's MELD .mp4 files!
+                wf = load_audio(str(mp4), target_sr=16000)
+                
+                # Convert stereo to mono if needed
+                if isinstance(wf, torch.Tensor):
+                    if wf.shape[0] > 1:
+                        wf = wf.mean(dim=0, keepdim=True)
+                    torchaudio.save(str(target_wav), wf, 16000)
+                    converted += 1
             except Exception as e:
                 logger.warning(f"\nFailed to convert {mp4}: {e}")
             
