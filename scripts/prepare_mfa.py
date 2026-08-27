@@ -46,13 +46,15 @@ def prepare_subset(split, root, max_samples, output_dir):
             if wav_path.suffix.lower() == ".mp4":
                 try:
                     import torchaudio
-                    waveform, sr = torchaudio.load(str(wav_path))
-                    if sr != 16000:
-                        import torchaudio.functional as F
-                        waveform = F.resample(waveform, sr, 16000)
-                    if waveform.shape[0] > 1:
-                        waveform = waveform.mean(dim=0, keepdim=True)
-                    torchaudio.save(str(target_wav), waveform, 16000)
+                    from data.datasets import load_audio
+                    # load_audio handles torchaudio -> soundfile -> ffmpeg fallback
+                    waveform = load_audio(str(wav_path), target_sr=16000)
+                    if isinstance(waveform, dict):
+                        # if for some reason we hit the .pt feature cache, this shouldn't happen 
+                        # for MFA preparation, but guard just in case
+                        print(f"Skipping {wav_path} because load_audio returned precomputed dict")
+                    else:
+                        torchaudio.save(str(target_wav), waveform, 16000)
                 except Exception as e:
                     print(f"Error converting {wav_path}: {e}")
             else:
