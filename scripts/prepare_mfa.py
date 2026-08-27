@@ -35,15 +35,24 @@ def prepare_subset(split, root, max_samples, output_dir):
         except ValueError:
             rel_path = Path(split) / wav_path.name
             
-        target_wav = out_dir / rel_path
+        target_wav = (out_dir / rel_path).with_suffix(".wav")
         target_txt = target_wav.with_suffix(".txt")
         
         # Create parent directories
         target_wav.parent.mkdir(parents=True, exist_ok=True)
         
-        # Copy wav file
+        # Copy or convert file
         if wav_path.exists():
-            shutil.copy2(wav_path, target_wav)
+            import subprocess
+            if wav_path.suffix.lower() == ".mp4":
+                cmd = [
+                    "ffmpeg", "-y", "-i", str(wav_path), 
+                    "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", 
+                    str(target_wav)
+                ]
+                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                shutil.copy2(wav_path, target_wav)
         else:
             print(f"Warning: audio file not found: {wav_path}")
             
