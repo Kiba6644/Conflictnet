@@ -157,8 +157,9 @@ class ConflictNetTrainer:
         )
 
         from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
-        # Create EMA model with decay=0.999
-        self.ema_model = AveragedModel(self.model, multi_avg_fn=get_ema_multi_avg_fn(0.999))
+        # Use 0.99 for fine-tuning on small datasets (averages over ~100 steps / 2 epochs)
+        # 0.999 would average over ~1000 steps, causing massive 20-epoch lag on small datasets.
+        self.ema_model = AveragedModel(self.model, multi_avg_fn=get_ema_multi_avg_fn(0.99))
 
     def _setup_optimizer(self):
         lr = self.cfg.get("lr", 5e-5)
