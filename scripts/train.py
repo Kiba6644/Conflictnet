@@ -139,6 +139,8 @@ def parse_args(argv=None):
                    help="Additional epochs per retry")
     p.add_argument("--label_smoothing", type=float, default=0.05,
                    help="Label smoothing epsilon for conflict type BCE loss (0 = disabled)")
+    p.add_argument("--augment_p", type=float, default=0.5,
+                   help="Probability of applying augmentation per sample (0=off, 1=always)")
     return p.parse_args()
 
 
@@ -346,6 +348,10 @@ def main():
     augmentor = AudioAugmentor(
         sample_rate=16000,
         musan_path=getattr(args, "musan_path", None),
+        speed_perturb=True,
+        additive_noise=True,
+        time_mask=True,
+        p=getattr(args, "augment_p", 0.5),
     )
     # Both collate fns use the SAME prosody lookup (z-scores computed from
     # training-data-only speaker statistics by compute_prosody_stats.py).

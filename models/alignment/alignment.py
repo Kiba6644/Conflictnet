@@ -199,6 +199,7 @@ class ContextGatedContrastiveLoss(nn.Module):
         base_temperature: float = 0.15,
         context_gate_dim: int = 64,
         conflict_margin: float = 0.5,
+        queue_size: int = 1024,
     ):
         super().__init__()
         self.log_tau = nn.Parameter(torch.tensor(base_temperature).log())
@@ -210,6 +211,19 @@ class ContextGatedContrastiveLoss(nn.Module):
             nn.Tanh(),
             nn.Linear(context_gate_dim, 1),
         )
+
+        # Momentum queue for extra negatives (MoCo-style)
+        self.queue_size = queue_size
+        if queue_size > 0:
+            self.register_buffer(
+                "_audio_queue", F.normalize(torch.randn(queue_size, embed_dim), dim=1))
+            self.register_buffer(
+                "_text_queue", F.normalize(torch.randn(queue_size, embed_dim), dim=1))
+            self.register_buffer("_queue_ptr", torch.zeros(1, dtype=torch.long))
+        else:
+            self._audio_queue = None
+            self._text_queue = None
+            self._queue_ptr = None
 
     def forward(
         self,
@@ -241,31 +255,44 @@ class ContextGatedContrastiveLoss(nn.Module):
             delta_tau = self.context_gate(context_pooled).squeeze(-1)  # (B,)
             tau = (self.log_tau + delta_tau).exp()  # (B,) — per-sample temperature
 
-        # Un-scaled cosine similarity matrix (B, B)
+        # Expand similarity matrix with queue negatives if available
+        B = audio_embeds.size(0)
+        labels = torch.arange(B, device=audio_embeds.device)
+        
+        if self.queue_size > 0 and self._audio_queue is not None:
+            # Queue provides extra negative keys (detached, no gradient)
+            audio_keys = torch.cat([text_embeds,  self._text_queue.clone().detach()],  dim=0)  # (B+Q, D)
+            text_keys  = torch.cat([audio_embeds, self._audio_queue.clone().detach()], dim=0)  # (B+Q, D)
+            
+            # Logits: (B, B+Q) — first B columns are in-batch, rest are queue negatives
+            sim_a2t_raw = audio_embeds @ audio_keys.T
+            sim_t2a_raw = text_embeds  @ text_keys.T
+        else:
+            sim_a2t_raw = audio_embeds @ text_embeds.T
+            sim_t2a_raw = text_embeds  @ audio_embeds.T
+            
+        # For the separation loss, we still only care about in-batch similarities
         sim_raw = audio_embeds @ text_embeds.T  # (B, B)
 
         # Per-sample temperature scaling: each row (audio anchor) divided by its tau
         if tau.dim() > 0:
-            sim_a2t = sim_raw / tau.unsqueeze(1)  # (B, B) — audio-to-text, per-row temp
-            sim_t2a = sim_raw.T / tau.unsqueeze(1)  # (B, B) — text-to-audio, per-row temp
+            sim_a2t = sim_a2t_raw / tau.unsqueeze(1)  # (B, B+Q) — audio-to-text, per-row temp
+            sim_t2a = sim_t2a_raw / tau.unsqueeze(1)  # (B, B+Q) — text-to-audio, per-row temp
         else:
-            sim_a2t = sim_raw / tau
-            sim_t2a = sim_raw.T / tau
+            sim_a2t = sim_a2t_raw / tau
+            sim_t2a = sim_t2a_raw / tau
 
         # Standard symmetric InfoNCE
         # BUG FIX: removed the sarcasm_mask.all() early-exit that zeroed both
         # InfoNCE losses when an entire batch was conflict (common on MUStARD).
         # F.cross_entropy with ignore_index=-1 handles a fully-masked batch
         # gracefully without needing a special-case zero branch.
-        B = audio_embeds.size(0)
-        labels = torch.arange(B, device=audio_embeds.device)
         if sarcasm_mask is not None and sarcasm_mask.any():
             labels = labels.clone()
             labels[sarcasm_mask] = -1   # cross_entropy ignore_index=-1
         loss_a2t = F.cross_entropy(sim_a2t, labels, ignore_index=-1)
         loss_t2a = F.cross_entropy(sim_t2a, labels, ignore_index=-1)
         contrastive_loss = (loss_a2t + loss_t2a) / 2
-
         # Conflict separation loss: push paired audio↔text apart by margin
         # (uses un-scaled cosine similarities since margin is in cosine space)
         conflict_sep_loss = (sim_raw * 0.0).sum()
@@ -285,6 +312,20 @@ class ContextGatedContrastiveLoss(nn.Module):
                 ).mean()
 
         return contrastive_loss + conflict_sep_loss
+
+    @torch.no_grad()
+    def update_queue(self, audio_embed: torch.Tensor, text_embed: torch.Tensor):
+        """FIFO enqueue current batch, dequeue oldest entries."""
+        if self.queue_size <= 0 or self._audio_queue is None:
+            return
+        B = audio_embed.shape[0]
+        ptr = int(self._queue_ptr)
+        slots = list(range(ptr, ptr + B))
+        slots = [s % self.queue_size for s in slots]
+        self._audio_queue[slots] = F.normalize(audio_embed.detach().float(), dim=1)
+        self._text_queue[slots]  = F.normalize(text_embed.detach().float(), dim=1)
+        self._queue_ptr[0] = (ptr + B) % self.queue_size
+
 
 class MoEFusion(nn.Module):
     """Gated Multi-Modal Mixture-of-Experts (MoE) Fusion.

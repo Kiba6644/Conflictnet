@@ -137,6 +137,7 @@ class ConflictNetTrainer:
         self._autocast_device_type = torch.device(device).type
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self._max_unfreeze_audio_layers = cfg.get("unfreeze_audio_layers", 16)
 
         self.use_amp = cfg.get("amp", False) and "cuda" in device
         self.grad_scaler: Optional[torch.amp.GradScaler] = None
@@ -244,8 +245,64 @@ class ConflictNetTrainer:
         )
         sys.stdout.flush()
 
+    def _progressive_unfreeze(self, epoch: int):
+        """Unfreeze WavLM layers on a schedule to prevent early catastrophic forgetting."""
+        enc = getattr(getattr(self.model, "module", self.model), "audio_encoder", None)
+        if enc is None or not hasattr(enc, "_encoder"):
+            return
+        transformer_layers = getattr(
+            getattr(enc._encoder, "encoder", None), "layers", None
+        )
+        if transformer_layers is None:
+            return
+
+        n_total = len(transformer_layers)
+        max_unfreeze = getattr(self, "_max_unfreeze_audio_layers", 16)
+
+        if epoch < 5:
+            target = 0
+        elif epoch < 15:
+            target = min(6, max_unfreeze)
+        else:
+            target = max_unfreeze
+
+        # Check current state
+        current = sum(
+            1 for layer in transformer_layers
+            if any(p.requires_grad for p in layer.parameters())
+        )
+        if current == target:
+            return
+
+        # Re-freeze all backbone params
+        for p in enc._encoder.parameters():
+            p.requires_grad = False
+        enc.layer_weights.requires_grad_(True)  # always trains
+
+        # Unfreeze last `target` layers
+        unfreeze_from = n_total - target
+        for i, layer in enumerate(transformer_layers):
+            if i >= unfreeze_from:
+                for p in layer.parameters():
+                    p.requires_grad = True
+
+        logger.info(
+            f"[Progressive Unfreeze] Epoch {epoch}: "
+            f"{'all frozen' if target == 0 else f'unfreezing layers {unfreeze_from}–{n_total-1} ({target} layers)'}"
+        )
+
+        # Re-setup optimizer and restore scheduler state
+        if hasattr(self, "scheduler") and self.scheduler is not None:
+            saved_last_epoch = self.scheduler.last_epoch
+            self._setup_optimizer()
+            for _ in range(saved_last_epoch):
+                self.scheduler.step()
+        else:
+            self._setup_optimizer()
+
     def train_epoch(self, epoch: int, pretraining: bool = False) -> Dict[str, float]:
         self.model.train()
+        self._progressive_unfreeze(epoch)
         total_loss = 0.0
         n_batches = 0
 
@@ -358,6 +415,23 @@ class ConflictNetTrainer:
                     self.grad_scaler.scale(loss).backward()
                 else:
                     loss.backward()
+
+            # Update momentum queue if using contrastive loss
+            _model_inner = getattr(self.model, "module", self.model)
+            cl = getattr(getattr(_model_inner, "alignment_module", None), "contrastive_loss", None)
+            if cl is not None and hasattr(cl, "update_queue"):
+                import torch.distributed as dist
+                if dist.is_initialized():
+                    gathered_audio = [torch.zeros_like(output.audio_embed) for _ in range(dist.get_world_size())]
+                    gathered_text  = [torch.zeros_like(output.text_embed)  for _ in range(dist.get_world_size())]
+                    dist.all_gather(gathered_audio, output.audio_embed)
+                    dist.all_gather(gathered_text,  output.text_embed)
+                    audio_for_queue = torch.cat(gathered_audio, dim=0)
+                    text_for_queue  = torch.cat(gathered_text,  dim=0)
+                else:
+                    audio_for_queue = output.audio_embed
+                    text_for_queue  = output.text_embed
+                cl.update_queue(audio_for_queue, text_for_queue)
 
             if (n_batches + 1) % grad_accum_steps == 0:
                 if self.use_amp and self.grad_scaler is not None:

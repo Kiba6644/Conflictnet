@@ -44,8 +44,8 @@ training:
   compile: true
   batch_size: 32
   lr: 2e-5
-  epochs: 30
-  warmup_steps: 500
+  epochs: 100
+  warmup_steps: 1000
   curriculum:
     enabled: true
     warmup_epochs: 5
@@ -54,7 +54,7 @@ training:
     r: 32
     alpha: 32
   gradient_accumulation_steps: 1
-  early_stop_patience: 10
+  early_stop_patience: 15
   loss_balancing: uncertainty  # kendall2018
 
 # Data

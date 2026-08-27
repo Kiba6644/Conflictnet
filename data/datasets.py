@@ -928,7 +928,75 @@ class MELDDataset(Dataset):
                 f"from {total} total (max_samples={self.max_samples}) "
                 f"preserving {len(set(x['dialogue_id'] for x in items))} full dialogues."
             )
+            
+        if self.split == "train":
+            items = self._oversample_minority_dialogues(items)
+            
         return items
+
+    def _oversample_minority_dialogues(self, items: List[Dict]) -> List[Dict]:
+        """Duplicate entire dialogues containing minority-class utterances.
+        
+        Minority classes: disgust(1), fear(2), sadness(5).
+        Entire dialogue is duplicated (not individual utterances) to preserve
+        temporal context for ContextCache. Duplicated dialogues get unique
+        conversation_id suffixes so the cache treats them as new conversations.
+        
+        Target: bring minority classes to ~12% of total utterances.
+        Max copies: 3 (caps overfitting risk).
+        """
+        MINORITY_CLASSES = {1, 2, 5}  # disgust, fear, sadness
+
+        # Group items by dialogue_id
+        dialogue_groups: Dict[str, List[Dict]] = {}
+        for item in items:
+            did = str(item.get("dialogue_id", ""))
+            dialogue_groups.setdefault(did, []).append(item)
+
+        # Find dialogues with at least one minority utterance
+        minority_dialogues = []
+        for did, diag_items in dialogue_groups.items():
+            has_minority = any(
+                float(item.get("conflict_type_labels", [0]*6)[c]) > 0.5
+                for item in diag_items
+                for c in MINORITY_CLASSES
+            )
+            if has_minority:
+                minority_dialogues.append(diag_items)
+
+        if not minority_dialogues:
+            return items
+
+        # Calculate how many copies to add
+        total = len(items)
+        minority_utts = sum(
+            1 for item in items
+            if any(float(item.get("conflict_type_labels", [0]*6)[c]) > 0.5
+                   for c in MINORITY_CLASSES)
+        )
+        target_minority = int(0.12 * total)
+        copies_needed = min(
+            3,
+            max(0, (target_minority - minority_utts) // max(1, len(minority_dialogues)))
+        )
+
+        extra = []
+        for copy_idx in range(copies_needed):
+            for diag_items in minority_dialogues:
+                for item in diag_items:
+                    tagged = dict(item)
+                    orig_cid = item.get("conversation_id", item.get("dialogue_id", "unk"))
+                    tagged["conversation_id"] = f"{orig_cid}_aug{copy_idx}"
+                    extra.append(tagged)
+
+        if extra:
+            logger.info(
+                f"[MELDDataset] Oversampled {len(minority_dialogues)} minority dialogues "
+                f"×{copies_needed} → +{len(extra)} utterances "
+                f"(minority % before: {100*minority_utts/total:.1f}%, "
+                f"after: {100*(minority_utts+len(extra))/(total+len(extra)):.1f}%)"
+            )
+        return items + extra
 
     def __len__(self) -> int:
         return len(self.items)
