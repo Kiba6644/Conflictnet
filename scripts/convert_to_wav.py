@@ -66,6 +66,17 @@ def convert_dataset(src_dir: str, dst_dir: str, max_train: int, max_val: int):
                 converted += 1
             except Exception as e:
                 logger.warning(f"\nFailed to convert {mp4}: {e}")
+                
+    # Copy all CSV metadata files to the new dataset so it is fully self-contained
+    import shutil
+    logger.info("Copying CSV metadata files...")
+    csv_files = list(src_path.rglob("*.csv"))
+    for csv_file in csv_files:
+        rel_csv_path = csv_file.relative_to(src_path)
+        target_csv = dst_path / rel_csv_path
+        target_csv.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(csv_file), str(target_csv))
+    logger.info(f"Successfully copied {len(csv_files)} CSV metadata files.")
             
     logger.info(f"Successfully converted {converted} new audio files to {dst_dir}")
 
