@@ -225,6 +225,7 @@ class ConflictNet(nn.Module):
         label_smoothing: float = 0.05,  # aligned with CLI --label_smoothing default
         sarcasm_pos_weight: float = 8.0,
         gradient_checkpointing: bool = False,
+        unfreeze_audio_layers: int = 0,
     ):
         super().__init__()
         self.embed_dim = embed_dim
@@ -255,7 +256,8 @@ class ConflictNet(nn.Module):
         # 1. Encoders
         self.audio_encoder = build_audio_encoder(
             audio_encoder_name,
-            gradient_checkpointing=gradient_checkpointing
+            gradient_checkpointing=gradient_checkpointing,
+            unfreeze_last_n_layers=unfreeze_audio_layers,
         )
         self.text_encoder = DeBERTaEncoder(
             use_lora=(lora_r > 0),

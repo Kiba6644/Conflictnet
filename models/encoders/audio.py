@@ -187,6 +187,7 @@ class WavLMWeightedEncoder(nn.Module):
         model_name: str = "microsoft/wavlm-large",
         freeze: bool = True,
         gradient_checkpointing: bool = False,
+        unfreeze_last_n_layers: int = 0,
     ):
         super().__init__()
         local_path = os.environ.get("CONFLICTNET_WAVLM_PATH")
@@ -209,9 +210,30 @@ class WavLMWeightedEncoder(nn.Module):
                 model_name,
                 output_hidden_states=True,
             )
+            # First freeze everything
             if freeze:
                 for p in enc.parameters():
                     p.requires_grad = False
+
+            # Then selectively unfreeze the last N transformer layers.
+            # The first 8 layers encode low-level acoustics (pitch, formants)
+            # that are universal — no need to fine-tune them.
+            # The last 16 layers encode higher-level speech and task-specific
+            # patterns — these benefit from MELD-specific adaptation.
+            if unfreeze_last_n_layers > 0:
+                n_transformer_layers = enc.config.num_hidden_layers
+                unfreeze_from = max(0, n_transformer_layers - unfreeze_last_n_layers)
+                for i, layer in enumerate(enc.encoder.layers):
+                    if i >= unfreeze_from:
+                        for p in layer.parameters():
+                            p.requires_grad = True
+                logger.info(
+                    f"[WavLMWeighted] Partially fine-tuning: unfrozen transformer "
+                    f"layers {unfreeze_from}–{n_transformer_layers - 1} "
+                    f"({unfreeze_last_n_layers}/{n_transformer_layers} layers, "
+                    f"~{unfreeze_last_n_layers * 12.6:.0f}M params unfrozen)"
+                )
+
             if gradient_checkpointing and hasattr(enc, "gradient_checkpointing_enable"):
                 enc.gradient_checkpointing_enable()
                 logger.info("[WavLMWeighted] Gradient checkpointing enabled")
@@ -493,9 +515,10 @@ def build_audio_encoder(name: str = "emotion2vec", **kwargs) -> nn.Module:
     }
     if name not in encoders:
         raise ValueError(f"Unknown audio encoder: {name}. Choose from {list(encoders.keys())}")
-    # Only WavLM encoders support gradient_checkpointing; strip the kwarg
-    # for all others to avoid a TypeError at construction time.
+    # Only WavLM encoders support gradient_checkpointing and unfreeze_last_n_layers;
+    # strip these kwargs for all others to avoid a TypeError at construction time.
     _wavlm_encoders = {"wavlm", "wavlm_weighted"}
     if name not in _wavlm_encoders:
         kwargs.pop("gradient_checkpointing", None)
+        kwargs.pop("unfreeze_last_n_layers", None)
     return encoders[name](**kwargs)

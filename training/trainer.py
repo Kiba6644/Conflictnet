@@ -169,7 +169,11 @@ class ConflictNetTrainer:
         no_decay = {"bias", "layer_norm.weight", "layernorm.weight", "LayerNorm.weight"}
 
         # Groups for LLRD
-        audio_encoder_params = []
+        # audio_encoder.layer_weights → 1e-5   (always: learns which WavLM layers matter)
+        # audio_encoder._encoder.encoder.layers.{20-23}.* → 5e-6  (fine-tuned backbone layers: conservative)
+        # audio_encoder.* other → 1e-5
+        wavlm_backbone_params = []   # unfrozen WavLM transformer layer weights
+        audio_encoder_params = []    # layer_weights + any other audio encoder trainable params
         deberta_lower_params = []
         deberta_lora_params = []
         head_params = []
@@ -183,7 +187,13 @@ class ConflictNetTrainer:
             weight_decay = 0.0 if is_no_decay else 0.01
 
             if "audio_encoder" in n:
-                audio_encoder_params.append({"params": p, "lr": 1e-5, "weight_decay": weight_decay})
+                # Unfrozen WavLM backbone layers (e.g. audio_encoder._encoder.encoder.layers.20.*)
+                # get a lower LR to prevent catastrophic forgetting of speech representations.
+                if "_encoder.encoder.layers." in n:
+                    wavlm_backbone_params.append({"params": p, "lr": 5e-6, "weight_decay": weight_decay})
+                else:
+                    # layer_weights, projection, etc. — standard audio encoder LR
+                    audio_encoder_params.append({"params": p, "lr": 1e-5, "weight_decay": weight_decay})
             elif "text_encoder" in n:
                 if "lora" in n:
                     deberta_lora_params.append({"params": p, "lr": 2e-5, "weight_decay": weight_decay})
@@ -195,7 +205,7 @@ class ConflictNetTrainer:
                 head_params.append({"params": p, "lr": 5e-5, "weight_decay": weight_decay})
 
         self.optimizer = AdamW(
-            audio_encoder_params + deberta_lower_params + deberta_lora_params + head_params + classifier_params,
+            wavlm_backbone_params + audio_encoder_params + deberta_lower_params + deberta_lora_params + head_params + classifier_params,
             **kwargs
         )
         grad_accum_steps = int(self.cfg.get("gradient_accumulation_steps", 1))

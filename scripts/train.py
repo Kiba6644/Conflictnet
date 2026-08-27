@@ -91,6 +91,10 @@ def parse_args(argv=None):
                    choices=["emotion2vec", "wavlm", "wavlm_weighted", "wav2vec2", "whisper", "dual"])
     p.add_argument("--gradient_checkpointing", action="store_true",
                    help="Enable gradient checkpointing on WavLM to reduce VRAM usage")
+    p.add_argument("--unfreeze_audio_layers", type=int, default=16,
+                   help="Number of final WavLM transformer layers to unfreeze for fine-tuning. "
+                        "0=fully frozen (layer_weights only), 16=recommended for 2xT4, 24=full fine-tune. "
+                        "Ignored for non-WavLM encoders.")
     p.add_argument("--audio_encoder_path", type=str, default=None,
                    help="Path to local audio encoder directory to bypass ModelScope")
     p.add_argument("--text_encoder_path", type=str, default=None,
@@ -119,7 +123,9 @@ def parse_args(argv=None):
                    help="LoRA alpha scaling (recommended: equal to lora_r for scaling=1.0)")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--gradient_accumulation_steps", type=int, default=1)
-    p.add_argument("--early_stop_patience", type=int, default=10)
+    p.add_argument("--early_stop_patience", type=int, default=15,
+                   help="Stop if val F1 does not improve for this many epochs (default 15 to allow "
+                        "WavLM fine-tuning plateaus to resolve)")
     p.add_argument("--resume_from", type=str, default=None)
     p.add_argument("--prosody_stats", type=str, default=None,
                    help="Path to .pt file from compute_prosody_stats.py with per-utterance z-scores")
@@ -200,6 +206,7 @@ def main():
             lora_alpha=args.lora_alpha,
             label_smoothing=args.label_smoothing,
             gradient_checkpointing=args.gradient_checkpointing,
+            unfreeze_audio_layers=args.unfreeze_audio_layers,
         )
 
     is_ddp_run = local_rank != -1
