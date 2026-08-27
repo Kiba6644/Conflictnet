@@ -781,8 +781,12 @@ class MELDDataset(Dataset):
         # Hardcode split folder paths based on Kaggle MELD structure
         if split_name == "train":
             split_folder = self.root / "train" / "train_splits"
+            if not split_folder.exists():
+                split_folder = self.root / "train"
         elif split_name == "dev":
             split_folder = self.root / "dev" / "dev_splits_complete"
+            if not split_folder.exists():
+                split_folder = self.root / "dev"
         elif split_name == "test":
             # Kaggle UI might truncate the name; check likely candidates
             split_folder = self.root / "test" / "output_repeated_splits_test"
@@ -790,6 +794,8 @@ class MELDDataset(Dataset):
                 split_folder = self.root / "test" / "output_repeated_splits"
             if not split_folder.exists():
                 split_folder = self.root / "test" / "output_repeated_spl"
+            if not split_folder.exists():
+                split_folder = self.root / "test"
         else:
             split_folder = self.root / split_name
 
