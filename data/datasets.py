@@ -829,8 +829,14 @@ class MELDDataset(Dataset):
                 emotion = str(row.get(field_map["emotion"], "neutral")).strip().lower()
                 speaker = str(row.get(field_map["speaker"], "unknown")).strip()
 
-                wav_path = split_folder / f"dia{dia_id}_utt{utt_id}.mp4"
-                if not wav_path.exists():
+                wav_path_mp4 = split_folder / f"dia{dia_id}_utt{utt_id}.mp4"
+                wav_path_wav = split_folder / f"dia{dia_id}_utt{utt_id}.wav"
+                
+                if wav_path_wav.exists():
+                    wav_path = wav_path_wav
+                elif wav_path_mp4.exists():
+                    wav_path = wav_path_mp4
+                else:
                     continue
 
                 conflict = emotion in MELD_CONFLICT_EMOTIONS
