@@ -921,8 +921,11 @@ class ConflictNetTrainer:
             training_state_path = checkpoint_path.parent / f"{stem}_training_state.pt"
             if training_state_path.exists():
                 ts: Dict[str, Any] = load_checkpoint_state(training_state_path, device=self.device)
-                self.optimizer.load_state_dict(ts["optimizer_state_dict"])
-                self.scheduler.load_state_dict(ts["scheduler_state_dict"])
+                try:
+                    self.optimizer.load_state_dict(ts["optimizer_state_dict"])
+                    self.scheduler.load_state_dict(ts["scheduler_state_dict"])
+                except Exception as e:
+                    logger.warning(f"Could not restore optimizer/scheduler state (likely parameter group mismatch): {e}. Proceeding with fresh optimizer momentum.")
                 if self.grad_scaler is not None and "grad_scaler_state_dict" in ts:
                     self.grad_scaler.load_state_dict(ts["grad_scaler_state_dict"])
 
@@ -953,10 +956,13 @@ class ConflictNetTrainer:
             if result.unexpected_keys:
                 logger.warning(f"Unexpected keys in checkpoint: {result.unexpected_keys}")
 
-            if "optimizer_state_dict" in ckpt:
-                self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-            if "scheduler_state_dict" in ckpt:
-                self.scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+            try:
+                if "optimizer_state_dict" in ckpt:
+                    self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+                if "scheduler_state_dict" in ckpt:
+                    self.scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+            except Exception as e:
+                logger.warning(f"Could not restore optimizer/scheduler state: {e}. Proceeding anyway.")
             self.global_step = ckpt.get("global_step", 0)
             self.best_val_f1 = ckpt.get("best_val_f1", 0.0)
             self._best_val_f1 = self.best_val_f1
