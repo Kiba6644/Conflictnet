@@ -116,6 +116,14 @@ def load_audio(path: str, target_sr: int = SAMPLE_RATE, max_len: float = MAX_AUD
         waveform = waveform.mean(dim=0, keepdim=True)  # stereo → mono
     if sr != target_sr:
         waveform = torchaudio.functional.resample(waveform, sr, target_sr)
+    
+    # Pad extremely short clips (e.g. <0.2s) to prevent WavLM masking crashes
+    # WavLM requires sequence_length > mask_length (10 frames = 3200 samples)
+    MIN_SAMPLES = 4000
+    if waveform.shape[1] < MIN_SAMPLES:
+        pad_amount = MIN_SAMPLES - waveform.shape[1]
+        waveform = torch.nn.functional.pad(waveform, (0, pad_amount))
+
     max_samples = int(max_len * target_sr)
     waveform = waveform[:, :max_samples]
     return waveform.squeeze(0)  # (T,)
