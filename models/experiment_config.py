@@ -29,6 +29,7 @@ class ExperimentConfig:
     audio_encoder: str = "emotion2vec"
     embed_dim: int = 256
     lora_r: int = 16
+    unfreeze_audio_layers: int = 16
 
     # ── Training hyper-parameters ───────────────────────────────────────
     epochs: int = 30
