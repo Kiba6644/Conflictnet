@@ -26,6 +26,7 @@ from .encoders import build_audio_encoder, DeBERTaEncoder
 from .speaker_norm import SpeakerNormalizer
 from .temporal import TransformerTemporalContext
 from .alignment import ProjectionHead, ContextGatedContrastiveLoss, CrossModalAttention, MoEFusion
+from .alignment.modality_router import ModalityRouter, entropy_regularization_loss
 from .alignment.word_divergence import WordLevelDivergence
 from .classifier import ConflictClassifier
 
@@ -73,6 +74,9 @@ class ConflictNetOutput:
 
     # Word divergence features (if MFA available)
     word_div_feats: Optional[torch.Tensor]    # (B, 8)
+
+    # Adaptive modality router gate weight (None when router is disabled)
+    router_alpha: Optional[torch.Tensor] = None  # (B, 1) gate weight α
 
     # Loss (computed if labels provided)
     loss: Optional[torch.Tensor] = None
@@ -226,6 +230,8 @@ class ConflictNet(nn.Module):
         sarcasm_pos_weight: float = 8.0,
         gradient_checkpointing: bool = False,
         unfreeze_audio_layers: int = 0,
+        use_adaptive_router: bool = False,
+        router_entropy_reg: float = 0.01,
     ):
         super().__init__()
         self.embed_dim = embed_dim
@@ -278,6 +284,11 @@ class ConflictNet(nn.Module):
             embed_dim=embed_dim,
             use_baseline_subtract=use_baseline_subtract,
         ) if use_speaker_norm else None
+
+        # Adaptive modality router (optional — disabled by default)
+        self.use_adaptive_router = use_adaptive_router
+        self.router_entropy_reg = router_entropy_reg
+        self.modality_router = ModalityRouter(embed_dim) if use_adaptive_router else None
 
         # Gating network: fuse (audio_proj + text_proj + speaker_feat) → fused_embed
         # Input: [audio_proj ∥ text_proj ∥ speaker_feat] = 3 × embed_dim
@@ -447,13 +458,30 @@ class ConflictNet(nn.Module):
         text_embed: torch.Tensor,
         speaker_feat: torch.Tensor,
         word_div_feats: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """Fuse audio, text, speaker embeddings via gated MLP or MoE."""
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Fuse audio, text, speaker embeddings via gated MLP or MoE.
+
+        When ``self.modality_router`` is enabled, a learned scalar α ∈ [0,1]
+        weights text vs audio *before* the fusion gate:
+            audio_embed  ← (1 - α) * audio_embed
+            text_embed   ←       α * text_embed
+
+        Returns:
+            fused_embed: (B, embed_dim)
+            router_alpha: (B, 1) or None if router is disabled.
+        """
+        alpha = None
+        if self.modality_router is not None:
+            alpha = self.modality_router(text_embed, audio_embed)  # (B, 1)
+            # Weighted combination before MoE
+            audio_embed = (1 - alpha) * audio_embed
+            text_embed = alpha * text_embed
+
         if self.use_speaker_norm:
             combined = torch.cat([audio_embed, text_embed, speaker_feat], dim=-1)
         else:
             combined = torch.cat([audio_embed, text_embed], dim=-1)
-            
+
         if isinstance(self.fusion_gate, MoEFusion):
             gate_feats = []
             if self.use_speaker_norm:
@@ -463,9 +491,9 @@ class ConflictNet(nn.Module):
                     word_div_feats = torch.zeros(audio_embed.size(0), 11, device=audio_embed.device)
                 gate_feats.append(word_div_feats)
             gate_feat_tensor = torch.cat(gate_feats, dim=-1)
-            return self.fusion_gate(combined, gate_feat_tensor)
+            return self.fusion_gate(combined, gate_feat_tensor), alpha
         else:
-            return self.fusion_gate(combined)  # (B, embed_dim)
+            return self.fusion_gate(combined), alpha  # (B, embed_dim), alpha
 
     # ------------------------------------------------------------------
     # Full forward pass
@@ -554,7 +582,7 @@ class ConflictNet(nn.Module):
             self._word_div_warned = True
 
         # 4. Fuse current turn
-        fused_embed = self.fuse(audio_embed, text_embed, speaker_feat, word_div_feats)  # (B, D)
+        fused_embed, router_alpha = self.fuse(audio_embed, text_embed, speaker_feat, word_div_feats)  # (B, D)
 
         # 5. Temporal context (optional — skip if disabled for ablation)
         if self.temporal is not None:
@@ -670,6 +698,12 @@ class ConflictNet(nn.Module):
             if self.swap_objective is not None:
                 loss_breakdown["swap"] = losses[3].detach().item()
 
+            # 6e. Router entropy regularisation (penalises hard 0/1 collapse)
+            if self.modality_router is not None and router_alpha is not None:
+                router_ent_loss = entropy_regularization_loss(router_alpha)
+                loss = loss + self.router_entropy_reg * router_ent_loss
+                loss_breakdown["router_entropy"] = router_ent_loss.detach().item()
+
         return ConflictNetOutput(
             logits_type=logits_type,
             probs_type=probs_type,
@@ -682,6 +716,7 @@ class ConflictNet(nn.Module):
             context_pooled=context_pooled,
             per_turn_context=per_turn_ctx,
             word_div_feats=word_div_feats,
+            router_alpha=router_alpha,
             loss=loss,
             loss_breakdown=loss_breakdown,
         )

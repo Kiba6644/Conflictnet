@@ -48,6 +48,8 @@ class ExperimentConfig:
     use_speaker_adaptive_threshold: bool = True
     use_baseline_subtract: bool = True
     use_word_divergence: bool = True
+    use_adaptive_router: bool = False
+    router_entropy_reg: float = 0.01
 
     # ── Data configuration ──────────────────────────────────────────────
     temporal_max_turns: int = 8
@@ -89,6 +91,7 @@ class ExperimentConfig:
             "no_speaker_adaptive_threshold": "use_speaker_adaptive_threshold",
             "no_baseline_subtract": "use_baseline_subtract",
             "no_word_divergence": "use_word_divergence",
+            "use_adaptive_router": "use_adaptive_router",  # direct passthrough (no negation)
         }
 
         known = {f.name for f in dataclasses.fields(cls)}
