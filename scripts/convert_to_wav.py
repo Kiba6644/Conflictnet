@@ -26,6 +26,11 @@ import os
 import shutil
 import subprocess
 import sys
+
+# Suppress pydevd frozen modules warnings and force unbuffered output
+os.environ["PYTHONUNBUFFERED"] = "1"
+os.environ["PYDEVD_DISABLE_FILE_VALIDATION"] = "1"
+
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -35,10 +40,18 @@ from tqdm.auto import tqdm
 # Add project root to sys.path so 'data' can be imported if needed
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+
+class FlushHandler(logging.StreamHandler):
+    def emit(self, record):
+        super().emit(record)
+        self.flush()
+
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
+    handlers=[FlushHandler(sys.stdout)],
 )
 logger = logging.getLogger(__name__)
 

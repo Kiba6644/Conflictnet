@@ -23,10 +23,22 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Suppress pydevd frozen modules warnings and force unbuffered output
+os.environ["PYTHONUNBUFFERED"] = "1"
+os.environ["PYDEVD_DISABLE_FILE_VALIDATION"] = "1"
+
+
+class FlushHandler(logging.StreamHandler):
+    def emit(self, record):
+        super().emit(record)
+        self.flush()
+
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
+    handlers=[FlushHandler(sys.stdout)],
 )
 logger = logging.getLogger(__name__)
 
