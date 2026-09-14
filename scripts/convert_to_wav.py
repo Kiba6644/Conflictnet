@@ -252,17 +252,36 @@ def main():
     logger.info(f"Copied metadata CSV files to {dst_root}")
 
     num_workers = args.workers or min(16, max(4, (os.cpu_count() or 4) * 2))
-    logger.info(f"Starting conversion of {len(all_tasks):,} files using {num_workers} parallel workers...")
+    total_files = len(all_tasks)
+    logger.info(f"Starting conversion of {total_files:,} files using {num_workers} parallel workers...")
 
+    import time
+    start_time = time.time()
     successful = 0
+    done_count = 0
+    log_interval = max(500, total_files // 20)  # Log every ~5% or 500 files
+
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
         futures = [executor.submit(convert_single_file, task) for task in all_tasks]
-        for fut in tqdm(as_completed(futures), total=len(futures), desc="Converting to 16kHz WAV"):
+        for fut in tqdm(as_completed(futures), total=total_files, desc="Converting to 16kHz WAV", file=sys.stdout):
             if fut.result():
                 successful += 1
+            done_count += 1
+            if done_count % log_interval == 0 or done_count == total_files:
+                elapsed = time.time() - start_time
+                rate = done_count / max(1.0, elapsed)
+                remaining = (total_files - done_count) / max(0.1, rate)
+                logger.info(
+                    f"[Progress] {done_count:,}/{total_files:,} ({100*done_count/total_files:.1f}%) | "
+                    f"Speed: {rate:.1f} clips/s | Elapsed: {int(elapsed//60)}m {int(elapsed%60):02d}s | "
+                    f"ETA: {int(remaining//60)}m {int(remaining%60):02d}s"
+                )
+                sys.stdout.flush()
 
+    total_time = time.time() - start_time
     logger.info(
-        f"Conversion complete! Successfully processed {successful}/{len(all_tasks)} files into {dst_root}"
+        f"✅ Conversion complete! Processed {successful:,}/{total_files:,} files in {int(total_time//60)}m {int(total_time%60):02d}s "
+        f"({successful/max(1.0, total_time):.1f} clips/s) into {dst_root}"
     )
 
 

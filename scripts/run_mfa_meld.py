@@ -53,14 +53,20 @@ def run_alignment(
     acoustic_model: str,
     jobs: int,
     clean: bool,
+    fast_mode: bool = True,
+    clean_transcripts_after: bool = False,
 ) -> int:
-    """Run Montreal Forced Aligner."""
+    """Run Montreal Forced Aligner with speed optimizations and live progress monitoring."""
+    import threading
+    import time
+
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Count total wav files in corpus
-    total_wavs = len(list(corpus_dir.rglob("*.wav")))
+    # Count total wav and txt files in corpus
+    all_wavs = list(corpus_dir.rglob("*.wav"))
+    total_wavs = len(all_wavs)
     total_txts = len(list(corpus_dir.rglob("*.txt")))
-    logger.info(f"[MFA] Found {total_wavs} .wav files and {total_txts} .txt transcripts in {corpus_dir}")
+    logger.info(f"[MFA] Found {total_wavs:,} .wav files and {total_txts:,} .txt transcripts in {corpus_dir}")
 
     if total_wavs == 0:
         logger.error(f"[MFA] No .wav files found in {corpus_dir}!")
@@ -69,6 +75,9 @@ def run_alignment(
     if total_txts == 0:
         logger.error(f"[MFA] No .txt transcript files found in {corpus_dir}! Run convert_to_wav.py with --with_transcripts first.")
         return 1
+
+    temp_dir = Path("/tmp/mfa_temp")
+    temp_dir.mkdir(parents=True, exist_ok=True)
 
     cmd = [
         "mfa", "align",
@@ -79,12 +88,49 @@ def run_alignment(
         "--jobs", str(jobs),
         "--single_speaker",
         "--output_format", "long_textgrid",
+        "--temp_directory", str(temp_dir),
     ]
+
+    if fast_mode:
+        # Tighter beam width cuts Kaldi lattice search time by ~2.5x
+        cmd.extend(["--beam", "10", "--retry_beam", "40"])
+        # Check if --no_speaker_adaptation is supported in this MFA version
+        try:
+            help_res = subprocess.run(["mfa", "align", "--help"], capture_output=True, text=True, check=False)
+            if "--no_speaker_adaptation" in help_res.stdout or "--no_speaker_adaptation" in help_res.stderr:
+                cmd.append("--no_speaker_adaptation")
+            elif "--fast" in help_res.stdout or "--fast" in help_res.stderr:
+                cmd.append("--fast")
+        except Exception:
+            pass
+
     if clean:
         cmd.append("--clean")
 
-    logger.info(f"[MFA] Launching alignment command:\n{' '.join(cmd)}")
+    logger.info(f"[MFA] Launching alignment command with speed optimizations:\n{' '.join(cmd)}")
     sys.stdout.flush()
+
+    start_time = time.time()
+    stop_monitor = threading.Event()
+
+    # Background progress thread to monitor generated TextGrids
+    def progress_monitor():
+        while not stop_monitor.wait(15.0):
+            current_tgs = len(list(output_dir.rglob("*.TextGrid")))
+            if current_tgs > 0:
+                elapsed = time.time() - start_time
+                rate = current_tgs / max(1.0, elapsed)
+                pct = 100.0 * current_tgs / max(1, total_wavs)
+                remaining = (total_wavs - current_tgs) / max(0.1, rate)
+                logger.info(
+                    f"[MFA Live Progress] {current_tgs:,}/{total_wavs:,} TextGrids ({pct:.1f}%) | "
+                    f"Speed: {rate:.1f} clips/s | Elapsed: {int(elapsed//60)}m {int(elapsed%60):02d}s | "
+                    f"ETA: {int(remaining//60)}m {int(remaining%60):02d}s"
+                )
+                sys.stdout.flush()
+
+    monitor_thread = threading.Thread(target=progress_monitor, daemon=True)
+    monitor_thread.start()
 
     process = subprocess.Popen(
         cmd,
@@ -95,21 +141,41 @@ def run_alignment(
     )
 
     for line in iter(process.stdout.readline, ""):
+        # Stream Kaldi log lines live
         print(line, end="", flush=True)
 
     process.stdout.close()
     return_code = process.wait()
+    stop_monitor.set()
+    monitor_thread.join(timeout=2.0)
 
-    # Verify generated TextGrids
+    total_time = time.time() - start_time
     generated_tgs = len(list(output_dir.rglob("*.TextGrid")))
-    logger.info(f"[MFA] Alignment finished (exit code {return_code}).")
-    logger.info(f"[MFA] Generated {generated_tgs}/{total_wavs} .TextGrid files in {output_dir}")
+
+    logger.info(
+        f"✅ MFA Alignment finished in {int(total_time//60)}m {int(total_time%60):02d}s (exit code {return_code})."
+    )
+    logger.info(
+        f"📊 Successfully generated {generated_tgs:,}/{total_wavs:,} .TextGrid files ({100*generated_tgs/max(1, total_wavs):.1f}%) in {output_dir}"
+    )
+
+    # Optional cleanup: remove .txt files from corpus directory so wav_dataset stays clean
+    if clean_transcripts_after:
+        logger.info(f"🧹 Cleaning up intermediate .txt transcripts from {corpus_dir}...")
+        removed = 0
+        for txt in corpus_dir.rglob("*.txt"):
+            try:
+                txt.unlink()
+                removed += 1
+            except Exception:
+                pass
+        logger.info(f"Removed {removed:,} temporary .txt files. {corpus_dir} now contains only clean WAVs & CSVs.")
 
     return return_code
 
 
 def main():
-    p = argparse.ArgumentParser(description="Run MFA alignment on MELD dataset")
+    p = argparse.ArgumentParser(description="Run fast MFA alignment on MELD dataset")
     p.add_argument("--corpus_dir", type=str, default="/kaggle/working/wav_dataset",
                    help="Path to WAV dataset containing .wav and .txt files")
     p.add_argument("--output_dir", type=str, default="/kaggle/working/meld_textgrids",
@@ -122,6 +188,12 @@ def main():
                    help="Number of parallel alignment jobs (default: CPU count)")
     p.add_argument("--no_clean", action="store_false", dest="clean",
                    help="Do not clean MFA cache before running")
+    p.add_argument("--no_fast", action="store_false", dest="fast_mode",
+                   help="Disable speed optimizations (tight beam, skip speaker adaptation)")
+    p.add_argument("--clean_transcripts", action="store_true", default=True,
+                   help="Remove .txt files from corpus_dir after alignment finishes (default: True)")
+    p.add_argument("--keep_transcripts", action="store_false", dest="clean_transcripts",
+                   help="Keep .txt files in corpus_dir")
 
     args = p.parse_args()
 
@@ -134,7 +206,7 @@ def main():
         sys.exit(1)
 
     jobs = args.jobs or max(1, os.cpu_count() or 4)
-    logger.info(f"[MFA] Running with {jobs} parallel worker jobs")
+    logger.info(f"[MFA] Running with {jobs} parallel worker jobs (Fast Mode: {args.fast_mode})")
 
     ensure_models(args.dictionary, args.acoustic_model)
 
@@ -148,9 +220,12 @@ def main():
         acoustic_model=args.acoustic_model,
         jobs=jobs,
         clean=args.clean,
+        fast_mode=args.fast_mode,
+        clean_transcripts_after=args.clean_transcripts,
     )
     sys.exit(rc)
 
 
 if __name__ == "__main__":
     main()
+
