@@ -162,7 +162,7 @@ class ConflictNetTrainer:
         self.ema_model = AveragedModel(self.model, multi_avg_fn=get_ema_multi_avg_fn(0.99))
 
     def _setup_optimizer(self):
-        lr = self.cfg.get("lr", 5e-5)
+        lr = self.cfg.get("lr", 3e-5)
         # Use fused=True if supported (PyTorch 2.0+)
         kwargs = {}
         if hasattr(torch.optim.AdamW, "__init__") and "fused" in AdamW.__init__.__code__.co_varnames:
@@ -170,10 +170,31 @@ class ConflictNetTrainer:
 
         no_decay = {"bias", "layer_norm.weight", "layernorm.weight", "LayerNorm.weight"}
 
-        # Groups for LLRD
-        # audio_encoder.layer_weights → 1e-5   (always: learns which WavLM layers matter)
-        # audio_encoder._encoder.encoder.layers.{20-23}.* → 5e-6  (fine-tuned backbone layers: conservative)
-        # audio_encoder.* other → 1e-5
+        # Layer-wise Learning Rate Decay (LLRD) — all groups expressed as ratios of base lr
+        # so that --lr correctly scales the entire schedule.
+        #
+        # Ratios (derived from empirically-tuned values at base_lr=3e-5):
+        #   WavLM backbone layers  → lr × 1/6   ≈ prevents catastrophic forgetting of speech representations
+        #   Audio encoder head     → lr × 1/3   ≈ layer_weights + projection head (moderate)
+        #   DeBERTa lower layers   → lr × 1/3   ≈ conservative for frozen-base fine-tuning
+        #   DeBERTa LoRA adapters  → lr × 2/3   ≈ LoRA adapters can absorb larger updates
+        #   Projection/fusion/temp → lr × 5/3   ≈ freely trainable heads, no forgetting risk
+        #   Classifier             → lr × 10/3  ≈ final layer adapts fastest to new task
+
+        wavlm_backbone_lr  = lr * (1.0 / 6.0)
+        audio_encoder_lr   = lr * (1.0 / 3.0)
+        deberta_lower_lr   = lr * (1.0 / 3.0)
+        deberta_lora_lr    = lr * (2.0 / 3.0)
+        head_lr            = lr * (5.0 / 3.0)
+        classifier_lr      = lr * (10.0 / 3.0)
+
+        logger.info(
+            f"[Optimizer] LLRD with base lr={lr:.2e} | "
+            f"wavlm_backbone={wavlm_backbone_lr:.2e} | audio_enc={audio_encoder_lr:.2e} | "
+            f"deberta_lower={deberta_lower_lr:.2e} | deberta_lora={deberta_lora_lr:.2e} | "
+            f"heads={head_lr:.2e} | classifier={classifier_lr:.2e}"
+        )
+
         wavlm_backbone_params = []   # unfrozen WavLM transformer layer weights
         audio_encoder_params = []    # layer_weights + any other audio encoder trainable params
         deberta_lower_params = []
@@ -184,27 +205,27 @@ class ConflictNetTrainer:
         for n, p in self.model.named_parameters():
             if not p.requires_grad:
                 continue
-                
+
             is_no_decay = any(nd in n for nd in no_decay)
             weight_decay = 0.0 if is_no_decay else 0.01
 
             if "audio_encoder" in n:
-                # Unfrozen WavLM backbone layers (e.g. audio_encoder._encoder.encoder.layers.20.*)
-                # get a lower LR to prevent catastrophic forgetting of speech representations.
+                # Unfrozen WavLM backbone layers get the most conservative LR
+                # to prevent catastrophic forgetting of speech representations.
                 if "_encoder.encoder.layers." in n:
-                    wavlm_backbone_params.append({"params": p, "lr": 5e-6, "weight_decay": weight_decay})
+                    wavlm_backbone_params.append({"params": p, "lr": wavlm_backbone_lr, "weight_decay": weight_decay})
                 else:
-                    # layer_weights, projection, etc. — standard audio encoder LR
-                    audio_encoder_params.append({"params": p, "lr": 1e-5, "weight_decay": weight_decay})
+                    # layer_weights, projection head, etc.
+                    audio_encoder_params.append({"params": p, "lr": audio_encoder_lr, "weight_decay": weight_decay})
             elif "text_encoder" in n:
                 if "lora" in n:
-                    deberta_lora_params.append({"params": p, "lr": 2e-5, "weight_decay": weight_decay})
+                    deberta_lora_params.append({"params": p, "lr": deberta_lora_lr, "weight_decay": weight_decay})
                 else:
-                    deberta_lower_params.append({"params": p, "lr": 1e-5, "weight_decay": weight_decay})
+                    deberta_lower_params.append({"params": p, "lr": deberta_lower_lr, "weight_decay": weight_decay})
             elif "classifier" in n:
-                classifier_params.append({"params": p, "lr": 1e-4, "weight_decay": weight_decay})
+                classifier_params.append({"params": p, "lr": classifier_lr, "weight_decay": weight_decay})
             else:
-                head_params.append({"params": p, "lr": 5e-5, "weight_decay": weight_decay})
+                head_params.append({"params": p, "lr": head_lr, "weight_decay": weight_decay})
 
         self.optimizer = AdamW(
             wavlm_backbone_params + audio_encoder_params + deberta_lower_params + deberta_lora_params + head_params + classifier_params,
@@ -490,8 +511,20 @@ class ConflictNetTrainer:
 
         is_ddp = torch.distributed.is_initialized()
         local_rank = int(os.environ.get("LOCAL_RANK", -1))
-        # Must exactly match the keys generated by Rank 0!
-        metric_keys = ["val/auc_binary", "val/f1_binary", "val/f1_macro", "val/f1_weighted", "val/macro_ap"]
+        # Must exactly match the sorted keys generated by Rank 0 in the metrics dict!
+        metric_keys = sorted([
+            "val/auc_binary",
+            "val/f1_binary",
+            "val/f1_macro",
+            "val/f1_weighted",
+            "val/macro_ap",
+            # Calibrated threshold metrics
+            "val/f1_binary_cal",
+            "val/binary_thresh",
+            "val/f1_macro_cal",
+            "val/f1_weighted_cal",
+            "val/class_thresh",
+        ])
         
         self.model.eval()
         self.ema_model.eval()
@@ -597,13 +630,29 @@ class ConflictNetTrainer:
             # --- Binary conflict F1 / AUC (dataset-agnostic) ---
             # Max probability across conflict emotion slots (anger, disgust, fear = indices 0,1,2)
             conflict_prob = probs[:, :3].max(axis=1)
-            bin_pred = (conflict_prob > 0.5).astype(int)
             binary_int = binary.astype(int)
-            f1_binary = f1_score(binary_int, bin_pred, zero_division=0)
+
+            # Fixed-threshold binary F1 at 0.5 — used for model selection (no val leakage)
+            bin_pred_fixed = (conflict_prob > 0.5).astype(int)
+            f1_binary = f1_score(binary_int, bin_pred_fixed, zero_division=0)
+
             try:
                 auc_binary = roc_auc_score(binary_int, conflict_prob)
             except ValueError:
                 auc_binary = 0.5  # degenerate split with only one class present
+
+            # --- Calibrated binary threshold sweep ---
+            # Sweeps 0.05–0.95 to find the threshold that maximises binary F1 on the val set.
+            # Reported as a separate metric so model-selection (val/f1_weighted) stays clean.
+            best_binary_thresh = 0.5
+            best_binary_f1_cal = f1_binary
+            for _thresh in np.arange(0.05, 0.96, 0.05):
+                _preds = (conflict_prob > _thresh).astype(int)
+                _f1 = f1_score(binary_int, _preds, zero_division=0)
+                if _f1 > best_binary_f1_cal:
+                    best_binary_f1_cal = _f1
+                    best_binary_thresh = float(_thresh)
+            self._best_binary_thresh = best_binary_thresh
 
             # --- Per-class AP, averaged over classes that have at least one positive ---
             per_class_ap = []
@@ -615,21 +664,41 @@ class ConflictNetTrainer:
                         pass
             macro_ap = float(np.mean(per_class_ap)) if per_class_ap else 0.0
 
-            # Weighted and Macro F1 over all classes.
-            # Using binary_f1 here was incorrect: it collapsed the multi-class signal
-            # to a single conflict/non-conflict decision and ignored per-emotion class performance.
+            # --- Multi-label F1 at fixed 0.5 threshold (drives checkpoint selection) ---
             from sklearn.metrics import f1_score as _f1
-            f1_macro = _f1(labels, (probs >= 0.5).astype(int), average="macro", zero_division=0)
+            f1_macro    = _f1(labels, (probs >= 0.5).astype(int), average="macro",    zero_division=0)
             f1_weighted = _f1(labels, (probs >= 0.5).astype(int), average="weighted", zero_division=0)
 
+            # --- Calibrated per-class threshold sweep ---
+            # A single shared threshold is swept; per-class thresholds would leak more aggressively.
+            best_class_thresh = 0.5
+            best_f1_weighted_cal = f1_weighted
+            for _thresh in np.arange(0.05, 0.96, 0.05):
+                _preds = (probs >= _thresh).astype(int)
+                _f1w_true = _f1(labels, _preds, average="weighted", zero_division=0)
+                if _f1w_true > best_f1_weighted_cal:
+                    best_f1_weighted_cal = _f1w_true
+                    best_class_thresh = float(_thresh)
+            self._best_class_thresh = best_class_thresh
+            f1_macro_cal    = _f1(labels, (probs >= best_class_thresh).astype(int), average="macro",    zero_division=0)
+            f1_weighted_cal = best_f1_weighted_cal
+
             metrics = {
-                "val/f1_binary": float(f1_binary),
-                "val/auc_binary": float(auc_binary),
-                "val/macro_ap": float(macro_ap),
-                "val/f1_macro": float(f1_macro),
+                # ── Uncalibrated (threshold=0.5) — used for checkpoint selection ──────
+                "val/f1_binary":   float(f1_binary),
+                "val/auc_binary":  float(auc_binary),
+                "val/macro_ap":    float(macro_ap),
+                "val/f1_macro":    float(f1_macro),
                 # val/f1_weighted drives best-checkpoint and early-stopping logic.
                 "val/f1_weighted": float(f1_weighted),
+                # ── Calibrated (threshold swept on val set) — for reporting only ──────
+                "val/f1_binary_cal":   float(best_binary_f1_cal),
+                "val/binary_thresh":   float(best_binary_thresh),
+                "val/f1_macro_cal":    float(f1_macro_cal),
+                "val/f1_weighted_cal": float(f1_weighted_cal),
+                "val/class_thresh":    float(best_class_thresh),
             }
+
             is_ddp = torch.distributed.is_initialized() and int(os.environ.get("LOCAL_RANK", -1)) != -1
             if is_ddp:
                 metric_keys = sorted(list(metrics.keys()))
@@ -858,6 +927,10 @@ class ConflictNetTrainer:
             "global_step": self.global_step,
             "best_val_f1": self.best_val_f1,
             "epoch": epoch,
+            # Calibrated inference thresholds (set by evaluate() after each val sweep).
+            # Use these at inference time instead of 0.5 for best F1 on this distribution.
+            "best_binary_thresh": getattr(self, "_best_binary_thresh", 0.5),
+            "best_class_thresh":  getattr(self, "_best_class_thresh",  0.5),
             **self._get_git_info(),
         }
         if self.exp_config is not None:
