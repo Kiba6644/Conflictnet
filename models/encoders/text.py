@@ -118,7 +118,7 @@ class DeBERTaEncoder(nn.Module):
             self._lora_backend = "frozen"
             logger.info("[LoRA] Using DDP-selected frozen DeBERTa backend")
             return
-        try:
+        def _init_peft():
             from peft import LoraConfig, TaskType, get_peft_model
             config = LoraConfig(
                 task_type=TaskType.FEATURE_EXTRACTION,
@@ -133,7 +133,22 @@ class DeBERTaEncoder(nn.Module):
             total = sum(p.numel() for p in self.encoder.parameters())
             logger.info(f"[LoRA] Trainable: {trainable:,} / {total:,} ({100*trainable/total:.2f}%)")
             self._lora_backend = "peft"
+
+        try:
+            _init_peft()
         except Exception as e:
+            # If PEFT failed due to an outdated torchao version in the environment,
+            # mask torchao from sys.modules and retry standard LoRA initialization
+            if "torchao" in str(e).lower():
+                try:
+                    import sys
+                    sys.modules["torchao"] = None
+                    sys.modules["torchao.quantization"] = None
+                    _init_peft()
+                    return
+                except Exception as retry_e:
+                    logger.warning(f"PEFT retry without torchao failed: {retry_e}")
+
             if requested_lora_backend == "peft":
                 raise RuntimeError(
                     "Rank 0 selected PEFT/LoRA, but this rank could not initialise it: "
