@@ -664,19 +664,29 @@ class ConflictNetTrainer:
                         pass
             macro_ap = float(np.mean(per_class_ap)) if per_class_ap else 0.0
 
-            # --- Single-label argmax F1 (PRIMARY metric for model selection) ---
-            # MELD is a mutually-exclusive single-label dataset. argmax gives the
-            # correct predicted class; threshold-based multi-label eval destroys F1
-            # when max prob < 0.5 (very common with 6-way softmax-like distribution).
+            # --- Prior-balanced argmax F1 (PRIMARY metric for model selection) ---
+            # MELD/CREMA-D are highly imbalanced (Neutral is ~59%, Fear is ~3%).
+            # When using independent multi-label sigmoids, raw Neutral probability
+            # is almost always higher than rare minority emotions. Normalising by class
+            # priors (probs / class_priors) prevents majority-class collapse and evaluates
+            # true predictive power across all 6 emotion categories.
             from sklearn.metrics import f1_score as _f1
             y_true_cls = np.argmax(labels, axis=1)   # (N,) integer class indices
-            y_pred_cls = np.argmax(probs, axis=1)     # (N,) integer class indices
+
+            class_counts = labels.sum(axis=0)
+            class_priors = class_counts / np.maximum(class_counts.sum(), 1.0)
+            class_priors = np.maximum(class_priors, 1e-4)
+
+            # Balanced prediction: relative elevation above background class prior
+            balanced_scores = probs / class_priors
+            y_pred_cls = np.argmax(balanced_scores, axis=1)
+
             f1_weighted = _f1(y_true_cls, y_pred_cls, average="weighted", zero_division=0)
             f1_macro    = _f1(y_true_cls, y_pred_cls, average="macro",    zero_division=0)
 
-            # --- Calibrated per-class threshold sweep (kept for analysis / multi-label ablation) ---
+            # --- Calibrated per-class threshold sweep (for reporting / multi-label) ---
             best_class_thresh = 0.5
-            best_f1_weighted_cal = f1_weighted  # start from argmax baseline
+            best_f1_weighted_cal = f1_weighted
             for _thresh in np.arange(0.05, 0.96, 0.05):
                 _preds = (probs >= _thresh).astype(int)
                 _f1w_true = _f1(labels, _preds, average="weighted", zero_division=0)
@@ -684,7 +694,7 @@ class ConflictNetTrainer:
                     best_f1_weighted_cal = _f1w_true
                     best_class_thresh = float(_thresh)
             self._best_class_thresh = best_class_thresh
-            f1_macro_cal    = _f1(y_true_cls, y_pred_cls, average="macro",    zero_division=0)
+            f1_macro_cal    = f1_macro
             f1_weighted_cal = best_f1_weighted_cal
 
             metrics = {
