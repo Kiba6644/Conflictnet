@@ -30,8 +30,8 @@ os.environ["MS_DISABLE_PROGRESS_BAR"] = "1"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # Fix for Kaggle dual-T4 NCCL deadlocks during DDP broadcast
-os.environ["NCCL_P2P_DISABLE"] = "1"
-os.environ["NCCL_IB_DISABLE"] = "1"
+
+
 
 import torch
 
@@ -40,8 +40,8 @@ import torch
 # (which nn.MultiheadAttention uses) can enter infinite loops or cause Segmentation Faults 
 # when query_len=1 and key_len>1 (e.g. cross-modal attention with context).
 # Math backend is 100% stable and fast enough for our sequence lengths.
-torch.backends.cuda.enable_mem_efficient_sdp(False)
-torch.backends.cuda.enable_flash_sdp(False)
+torch.backends.cuda.enable_mem_efficient_sdp(True)
+torch.backends.cuda.enable_flash_sdp(True)
 torch.backends.cuda.enable_math_sdp(True)
 
 from torch.utils.data import DataLoader, ConcatDataset
@@ -183,8 +183,8 @@ def main():
         # Fix for Kaggle dual-T4 NCCL deadlocks
         # Kaggle's T4 GPUs do not support P2P over PCIe properly. This causes
         # any DDP collective operations (like barrier or broadcast) to hang forever.
-        os.environ["NCCL_P2P_DISABLE"] = "1"
-        os.environ["NCCL_IB_DISABLE"] = "1"
+        
+        
         
         torch.cuda.set_device(local_rank)
         args.device = f"cuda:{local_rank}"
