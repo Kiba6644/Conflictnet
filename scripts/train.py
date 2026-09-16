@@ -466,9 +466,8 @@ def main():
     train_set = ConcatDataset(train_datasets)
     val_set = ConcatDataset(val_datasets)
 
-    # Dynamically determine num_workers to speed up data loading per GPU process
-    # On Kaggle, /dev/shm limits cause silent deadlocks with persistent_workers.
-    optimal_workers = 0 if "KAGGLE_KERNEL_RUN_TYPE" in os.environ else min(8, os.cpu_count() or 1)
+    # Force num_workers=0 to prevent POSIX semaphore and SHM exhaustion on restricted Docker containers
+    optimal_workers = 0
     
     from torch.utils.data.distributed import DistributedSampler
     train_sampler = DistributedSampler(train_set) if local_rank != -1 else None
