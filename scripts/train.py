@@ -147,18 +147,24 @@ def parse_args(argv=None):
                    help="Label smoothing epsilon for conflict type BCE loss (0 = disabled)")
     p.add_argument("--use_adaptive_router", action="store_true",
                    help="Enable learned modality router alpha gate (text vs audio weighting)")
-    p.add_argument("--router_entropy_reg", type=float, default=0.01,
-                   help="Entropy regularization for modality router (prevents collapse)")
     p.add_argument("--augment_p", type=float, default=0.5,
                    help="Probability of applying augmentation per sample (0=off, 1=always)")
     p.add_argument("--num_workers", type=int, default=0,
                    help="DataLoader worker processes. Default 0 (single process). Set >0 if running in an environment with sufficient shared memory.")
-    return p.parse_args()
+    p.add_argument("--pt_dir", type=str, default=None,
+                   help="Path to precomputed features directory (sets CONFLICTNET_PT_DIR automatically)")
+    return p.parse_args(argv)
 
 
 @record
-def main():
-    args = parse_args(argv=None)
+def main(args=None):
+    if args is None:
+        args = parse_args(argv=None)
+
+    if args.pt_dir:
+        os.environ["CONFLICTNET_PT_DIR"] = str(Path(args.pt_dir).resolve())
+        logger.info(f"[ConflictNet] Set CONFLICTNET_PT_DIR={os.environ['CONFLICTNET_PT_DIR']}")
+
     # torchrun workers are not guaranteed to retain the notebook shell's
     # working directory. Resolve output paths relative to this repository once
     # so every rank shares manifests and checkpoint files.
@@ -664,6 +670,72 @@ def main():
             num_warmup_steps=0,
             num_training_steps=steps_per_epoch * args.resume_epochs,
         )
+
+
+def train_conflictnet(
+    meld_root: Optional[str] = None,
+    pt_dir: Optional[str] = None,
+    output_dir: str = "checkpoints",
+    batch_size: int = 16,
+    epochs: int = 35,
+    pretrain_epochs: int = 3,
+    lr: float = 3e-5,
+    audio_encoder: str = "wavlm_weighted",
+    unfreeze_audio_layers: int = 0,
+    amp: bool = True,
+    compile: bool = False,
+    iemocap_root: Optional[str] = None,
+    mustard_root: Optional[str] = None,
+    cremad_root: Optional[str] = None,
+    **kwargs,
+):
+    """Python function interface to train ConflictNet without CLI flags.
+    
+    Usage:
+        from scripts.train import train_conflictnet
+        
+        train_conflictnet(
+            meld_root="D:/datasts/wav_dataset",
+            pt_dir="D:/datasts/meld_features",
+            batch_size=16,
+            epochs=35,
+            lr=2.5e-5,
+        )
+    """
+    argv = []
+    if meld_root:
+        argv.extend(["--meld_root", str(meld_root)])
+    if pt_dir:
+        argv.extend(["--pt_dir", str(pt_dir)])
+    if iemocap_root:
+        argv.extend(["--iemocap_root", str(iemocap_root)])
+    if mustard_root:
+        argv.extend(["--mustard_root", str(mustard_root)])
+    if cremad_root:
+        argv.extend(["--cremad_root", str(cremad_root)])
+    argv.extend(["--output_dir", str(output_dir)])
+    argv.extend(["--batch_size", str(batch_size)])
+    argv.extend(["--epochs", str(epochs)])
+    argv.extend(["--pretrain_epochs", str(pretrain_epochs)])
+    argv.extend(["--lr", str(lr)])
+    argv.extend(["--audio_encoder", str(audio_encoder)])
+    argv.extend(["--unfreeze_audio_layers", str(unfreeze_audio_layers)])
+    if amp:
+        argv.append("--amp")
+    else:
+        argv.append("--no_amp")
+    if compile:
+        argv.append("--compile")
+    
+    for k, v in kwargs.items():
+        if isinstance(v, bool):
+            if v:
+                argv.append(f"--{k}")
+        elif v is not None:
+            argv.extend([f"--{k}", str(v)])
+            
+    args = parse_args(argv=argv)
+    return main(args=args)
 
 
 if __name__ == "__main__":
