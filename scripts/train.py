@@ -155,6 +155,8 @@ def parse_args(argv=None):
                    help="DataLoader worker processes. Default 0 (single process). Set >0 if running in an environment with sufficient shared memory.")
     p.add_argument("--pt_dir", type=str, default=None,
                    help="Path to precomputed features directory (sets CONFLICTNET_PT_DIR automatically)")
+    p.add_argument("--reset_scheduler", action="store_true",
+                   help="Reset LR and scheduler to a fresh cosine cycle when resuming with --resume_from")
     return p.parse_args(argv)
 
 
@@ -612,6 +614,17 @@ def main(args=None):
     start_epoch = 0
     if args.resume_from:
         start_epoch = trainer.load_checkpoint(args.resume_from)
+        if args.reset_scheduler:
+            target_total = args.epochs or cfg.get("epochs", 35)
+            remaining_epochs = max(1, target_total - start_epoch)
+            if target_total <= start_epoch:
+                remaining_epochs = args.resume_epochs
+                args.epochs = start_epoch + args.resume_epochs
+            trainer.reset_lr_and_scheduler(
+                lr=float(args.lr or cfg.get("lr", 5e-5)),
+                total_epochs=remaining_epochs,
+                warmup_steps=int(args.warmup_steps or 0),
+            )
 
     retries = 0
 

@@ -240,6 +240,35 @@ class ConflictNetTrainer:
             num_training_steps=max(1, steps_per_epoch * epochs),
         )
 
+    def reset_lr_and_scheduler(self, lr: float, total_epochs: int, warmup_steps: int = 0):
+        """Reset parameter group learning rates with LLRD and build a fresh cosine scheduler."""
+        wavlm_backbone_lr  = lr * (1.0 / 6.0)
+        audio_encoder_lr   = lr * (1.0 / 3.0)
+        deberta_lower_lr   = lr * (1.0 / 3.0)
+        deberta_lora_lr    = lr * (2.0 / 3.0)
+        head_lr            = lr * (5.0 / 3.0)
+        classifier_lr      = lr * (10.0 / 3.0)
+
+        logger.info(
+            f"[Optimizer] Rebuilding scheduler with base lr={lr:.2e} over {total_epochs} epochs | "
+            f"wavlm_backbone={wavlm_backbone_lr:.2e} | audio_enc={audio_encoder_lr:.2e} | "
+            f"deberta_lower={deberta_lower_lr:.2e} | deberta_lora={deberta_lora_lr:.2e} | "
+            f"heads={head_lr:.2e} | classifier={classifier_lr:.2e}"
+        )
+
+        for group in self.optimizer.param_groups:
+            group["lr"] = lr
+
+        grad_accum_steps = int(self.cfg.get("gradient_accumulation_steps", 1))
+        steps_per_epoch = max(1, len(self.train_loader) // grad_accum_steps)
+        self.scheduler = get_warmup_cosine_scheduler(
+            self.optimizer,
+            num_warmup_steps=warmup_steps,
+            num_training_steps=max(1, steps_per_epoch * total_epochs),
+        )
+        self._best_val_f1 = 0.0
+        self._patience_counter = 0
+
     def _setup_wandb(self):
         self.use_wandb = False
         local_rank = int(os.environ.get("LOCAL_RANK", "0"))
