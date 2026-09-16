@@ -419,7 +419,7 @@ class ConflictNetTrainer:
             loss = loss / grad_accum_steps
 
             total_batches = len(self.train_loader)
-            is_sync_step = ((n_batches + 1) % grad_accum_steps == 0) or ((n_batches + 1) == total_batches)
+            is_sync_step = ((n_batches + 1) % grad_accum_steps == 0) or ((n_batches + 1) == total_batches) or (self.global_step == 0 and n_batches == 0)
             
             # Use no_sync() if accumulating gradients in DDP to avoid premature all_reduce syncs
             import contextlib

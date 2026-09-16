@@ -694,7 +694,7 @@ class ConflictNet(nn.Module):
                 swap_loss = self.swap_objective(audio_embed, text_embed)
                 losses.append(swap_loss)
             elif self.swap_objective is not None:
-                swap_loss = (audio_embed * 0.0).sum()
+                swap_loss = (audio_embed * 0.0).sum() + sum((p * 0.0).sum() for p in self.swap_objective.parameters())
                 losses.append(swap_loss)
 
             loss, sigma_weights = self.multi_task_loss(losses)
