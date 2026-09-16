@@ -53,27 +53,29 @@ def focal_bce_loss(logits, targets, alpha=0.75, gamma=2.0, pos_weight=None):
 # Output container
 # ---------------------------------------------------------------------------
 
+from transformers.utils import ModelOutput
+
 @dataclasses.dataclass
-class ConflictNetOutput:
+class ConflictNetOutput(ModelOutput):
     """All outputs from a ConflictNet forward pass."""
     # Core predictions
-    logits_type: torch.Tensor       # (B, n_types) — raw BCE logits
-    probs_type: torch.Tensor        # (B, n_types) — sigmoid probabilities
-    severity: Optional[torch.Tensor]          # (B, 1) or None
-    conflict_flag: torch.Tensor     # (B,) bool
+    logits_type: Optional[torch.Tensor] = None       # (B, n_types) — raw BCE logits
+    probs_type: Optional[torch.Tensor] = None        # (B, n_types) — sigmoid probabilities
+    severity: Optional[torch.Tensor] = None          # (B, 1) or None
+    conflict_flag: Optional[torch.Tensor] = None     # (B,) bool
 
     # Embeddings for loss computation and attribution
-    audio_embed: torch.Tensor       # (B, embed_dim) projected audio
-    text_embed: torch.Tensor        # (B, embed_dim) projected text
-    speaker_feat: torch.Tensor      # (B, embed_dim) speaker projection
-    fused_embed: torch.Tensor       # (B, embed_dim) post-fusion, pre-temporal
-    context_pooled: torch.Tensor    # (B, embed_dim) temporal context pooled
+    audio_embed: Optional[torch.Tensor] = None       # (B, embed_dim) projected audio
+    text_embed: Optional[torch.Tensor] = None        # (B, embed_dim) projected text
+    speaker_feat: Optional[torch.Tensor] = None      # (B, embed_dim) speaker projection
+    fused_embed: Optional[torch.Tensor] = None       # (B, embed_dim) post-fusion, pre-temporal
+    context_pooled: Optional[torch.Tensor] = None    # (B, embed_dim) temporal context pooled
 
     # Per-turn context (when operating in dialogue mode)
-    per_turn_context: Optional[torch.Tensor]  # (B, T, embed_dim)
+    per_turn_context: Optional[torch.Tensor] = None  # (B, T, embed_dim)
 
     # Word divergence features (if MFA available)
-    word_div_feats: Optional[torch.Tensor]    # (B, 8)
+    word_div_feats: Optional[torch.Tensor] = None    # (B, 8)
 
     # Adaptive modality router gate weight (None when router is disabled)
     router_alpha: Optional[torch.Tensor] = None  # (B, 1) gate weight α
