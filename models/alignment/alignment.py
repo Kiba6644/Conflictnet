@@ -10,6 +10,7 @@ Based on the HuBERT-CLAP projection architecture, extended with:
 
 from __future__ import annotations
 
+import random
 from typing import Optional, Tuple
 
 import torch
@@ -91,11 +92,11 @@ class CrossModalAttention(nn.Module):
 
         # ModalDrop (during training)
         if self.training:
-            if torch.rand(1).item() < self.modal_drop_p:
+            if random.random() < self.modal_drop_p:
                 audio_embed = torch.zeros_like(audio_embed)
                 if audio_seq is not None:
                     audio_seq = torch.zeros_like(audio_seq)
-            if torch.rand(1).item() < self.modal_drop_p:
+            if random.random() < self.modal_drop_p:
                 text_embed = torch.zeros_like(text_embed)
                 if text_seq is not None:
                     text_seq = torch.zeros_like(text_seq)
