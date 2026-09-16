@@ -467,7 +467,7 @@ def main():
 
     # Dynamically determine num_workers to speed up data loading per GPU process
     # On Kaggle, /dev/shm limits cause silent deadlocks with persistent_workers.
-    optimal_workers = 0 if "KAGGLE_KERNEL_RUN_TYPE" in os.environ else min(4, os.cpu_count() or 1)
+    optimal_workers = 0 if "KAGGLE_KERNEL_RUN_TYPE" in os.environ else min(8, os.cpu_count() or 1)
     
     from torch.utils.data.distributed import DistributedSampler
     train_sampler = DistributedSampler(train_set) if local_rank != -1 else None
@@ -502,10 +502,7 @@ def main():
         shuffle=False
     )
 
-    # We are loading precomputed .pt feature dictionaries from disk, which is virtually instantaneous.
-    # Spawning multiprocessing workers (num_workers > 0) + pin_memory=True causes massive 
-    # IPC / shared-memory deadlocks and Segmentation Faults on Kaggle dual-T4 at the start of Epoch 2.
-    optimal_workers = 0
+    # Use the dynamically computed optimal_workers instead of 0
 
     train_loader = DataLoader(
         train_set,
