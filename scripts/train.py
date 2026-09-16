@@ -33,9 +33,15 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
 
+# --- CRITICAL FIX FOR 64MB DOCKER SHM LIMIT ---
+# We must set this programmatically BEFORE torch is imported so spawned workers inherit it.
+os.environ["TORCH_SHM_MANAGER_DIR"] = os.path.expanduser("~/tmp")
+os.makedirs(os.environ["TORCH_SHM_MANAGER_DIR"], exist_ok=True)
+
 import torch
 import torch.multiprocessing
 torch.multiprocessing.set_sharing_strategy('file_system')
+
 # Disable Memory-Efficient and Flash Attention backends globally.
 # On Kaggle's dual-T4 (Turing architecture) GPUs, PyTorch's scaled_dot_product_attention 
 # (which nn.MultiheadAttention uses) can enter infinite loops or cause Segmentation Faults 
