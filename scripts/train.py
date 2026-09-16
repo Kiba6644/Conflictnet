@@ -32,11 +32,13 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 # Fix for Kaggle dual-T4 NCCL deadlocks during DDP broadcast
 
 
-
 # --- CRITICAL FIX FOR 64MB DOCKER SHM LIMIT ---
-# We must set this programmatically BEFORE torch is imported so spawned workers inherit it.
-os.environ["TORCH_SHM_MANAGER_DIR"] = os.path.expanduser("~/tmp")
-os.makedirs(os.environ["TORCH_SHM_MANAGER_DIR"], exist_ok=True)
+# 'file_system' strategy writes IPC tensor files to TMPDIR instead of /dev/shm.
+# Point TMPDIR to /workspace (100GB) if available, otherwise ~/tmp.
+_shm_dir = "/workspace/torch_shm" if os.path.isdir("/workspace") else os.path.expanduser("~/tmp")
+os.makedirs(_shm_dir, exist_ok=True)
+os.environ["TMPDIR"] = _shm_dir
+os.environ["TORCH_SHM_MANAGER_DIR"] = _shm_dir
 
 import torch
 import torch.multiprocessing

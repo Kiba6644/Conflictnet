@@ -27,8 +27,12 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 # PyTorch's default 'file_descriptor' strategy allocates shared tensors via
 # shm_open(), which maps to /dev/shm. Most Docker/pod environments cap /dev/shm
 # at 64MB — far too small for multi-worker DataLoaders.
-# 'file_system' uses regular files in /tmp instead, bypassing the limit entirely.
+# 'file_system' uses regular files in TMPDIR instead, bypassing the limit entirely.
+# We point TMPDIR to /workspace (100GB) if available, otherwise /tmp.
 # Must be set before DataLoader workers are spawned.
+_shm_dir = "/workspace/torch_shm" if os.path.isdir("/workspace") else os.path.expanduser("~/tmp")
+os.makedirs(_shm_dir, exist_ok=True)
+os.environ["TMPDIR"] = _shm_dir
 import torch
 import torch.multiprocessing
 torch.multiprocessing.set_sharing_strategy("file_system")
