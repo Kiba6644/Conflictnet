@@ -20,8 +20,19 @@ from pathlib import Path
 
 # Fix for macOS OpenMP multiple initialization error
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+# Prevent HuggingFace tokenizer from spawning extra threads in DataLoader workers
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
+# --- FIX FOR DOCKER /dev/shm EXHAUSTION ---
+# PyTorch's default 'file_descriptor' strategy allocates shared tensors via
+# shm_open(), which maps to /dev/shm. Most Docker/pod environments cap /dev/shm
+# at 64MB — far too small for multi-worker DataLoaders.
+# 'file_system' uses regular files in /tmp instead, bypassing the limit entirely.
+# Must be set before DataLoader workers are spawned.
 import torch
+import torch.multiprocessing
+torch.multiprocessing.set_sharing_strategy("file_system")
+
 from torch.utils.data import DataLoader, ConcatDataset
 
 # Add project root to sys.path so 'data', 'models' etc. can be imported
