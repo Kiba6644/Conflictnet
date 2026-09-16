@@ -472,9 +472,8 @@ def main():
     train_set = ConcatDataset(train_datasets)
     val_set = ConcatDataset(val_datasets)
 
-    # Docker 64MB SHM limit reached: 8 workers * 2 prefetch * 15MB/batch = 240MB. 
-    # Forced to use 0 workers to bypass SHM entirely.
-    optimal_workers = 0
+    # Memory-Cap Hack: 2 workers * 1 prefetch * 15MB/batch = ~30MB (Safely under 64MB limit)
+    optimal_workers = 2
     
     from torch.utils.data.distributed import DistributedSampler
     train_sampler = DistributedSampler(train_set) if local_rank != -1 else None
@@ -509,8 +508,6 @@ def main():
         shuffle=False
     )
 
-    # Use the dynamically computed optimal_workers instead of 0
-
     train_loader = DataLoader(
         train_set,
         batch_sampler=train_batch_sampler,
@@ -518,6 +515,7 @@ def main():
         collate_fn=train_collate,
         pin_memory=False,
         persistent_workers=False,
+        prefetch_factor=1 if optimal_workers > 0 else None,
         multiprocessing_context='spawn' if optimal_workers > 0 else None,
     )
     
@@ -528,6 +526,7 @@ def main():
         collate_fn=val_collate,
         pin_memory=False,
         persistent_workers=False,
+        prefetch_factor=1 if optimal_workers > 0 else None,
         multiprocessing_context='spawn' if optimal_workers > 0 else None,
     )
 
