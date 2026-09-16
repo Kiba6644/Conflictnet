@@ -69,57 +69,69 @@ def extract_features_for_files(audio_files: list[Path], output_dir: str, batch_s
         
         logger.info(f"Extracting features for {len(pending_files)} files (skipped {len(audio_files) - len(pending_files)} already processed or hidden)...")
         
-        # 3. Process in batches
-        for i in tqdm(range(0, len(pending_files), batch_size), desc="Extracting"):
-            batch_files = pending_files[i:i+batch_size]
-            
-            # Load audio waveforms
-            waveforms = []
-            for path in batch_files:
-                wave = load_audio(str(path))
-                if isinstance(wave, dict):
-                    wave = torch.zeros(16000)
-                waveforms.append(wave)
-                
-            # Pad waveforms
-            max_len = max(w.shape[-1] for w in waveforms)
-            audio_padded = torch.zeros(len(waveforms), max_len, device=device)
-            audio_attention_mask = torch.zeros(len(waveforms), max_len, dtype=torch.bool, device=device)
-            for j, w in enumerate(waveforms):
-                audio_padded[j, :w.shape[-1]] = w.to(device)
-                audio_attention_mask[j, :w.shape[-1]] = True
-                
-            # Extract features
-            with torch.no_grad(), torch.autocast(device_type="cuda" if "cuda" in device else "cpu", enabled=True):
-                # Audio embed (WavLM / Emotion2Vec)
-                audio_embeds, audio_frames = audio_encoder(audio_padded, attention_mask=audio_attention_mask, return_frames=True)
-                # Speaker embed (ECAPA-TDNN)
-                speaker_embeds = speaker_norm.encode_speaker(audio_padded)
-                
-            # Save individually with directory hierarchy preserved
-            for j, path in enumerate(batch_files):
-                if data_root is not None and data_root in path.parents:
-                    rel = path.relative_to(data_root)
-                    pt_path = out_path / rel.with_suffix('.pt')
-                else:
-                    pt_path = out_path / path.parent.name / path.with_suffix('.pt').name
-                
-                pt_path.parent.mkdir(parents=True, exist_ok=True)
-                
-                # Trim audio_frames to the valid length for this specific waveform (50 frames/sec for 16kHz audio)
-                saved_frames = None
-                if audio_frames is not None:
-                    n_valid_frames = max(1, int(round(waveforms[j].shape[-1] / 320.0)))
-                    saved_frames = audio_frames[j, :n_valid_frames].cpu().clone()
+        from concurrent.futures import ThreadPoolExecutor
+        import sys
 
-                data = {
-                    "audio": audio_embeds[j].cpu().clone(),
-                    "speaker": speaker_embeds[j].cpu().clone(),
-                    "audio_frames": saved_frames,
-                }
-                torch.save(data, pt_path)
+        # 3. Process in batches with multi-threaded audio decoding
+        total_batches = (len(pending_files) + batch_size - 1) // batch_size
+        with ThreadPoolExecutor(max_workers=min(16, os.cpu_count() or 4)) as pool:
+            for b_idx, i in enumerate(range(0, len(pending_files), batch_size)):
+                batch_files = pending_files[i:i+batch_size]
                 
+                # Parallel audio loading across CPU threads
+                def _safe_load(p):
+                    wave = load_audio(str(p))
+                    if isinstance(wave, dict):
+                        wave = torch.zeros(16000)
+                    return wave
+
+                waveforms = list(pool.map(_safe_load, batch_files))
+                    
+                # Pad waveforms
+                max_len = max(w.shape[-1] for w in waveforms)
+                audio_padded = torch.zeros(len(waveforms), max_len, device=device)
+                audio_attention_mask = torch.zeros(len(waveforms), max_len, dtype=torch.bool, device=device)
+                for j, w in enumerate(waveforms):
+                    audio_padded[j, :w.shape[-1]] = w.to(device)
+                    audio_attention_mask[j, :w.shape[-1]] = True
+                    
+                # Extract features
+                with torch.no_grad(), torch.autocast(device_type="cuda" if "cuda" in device else "cpu", enabled=True):
+                    # Audio embed (WavLM / Emotion2Vec)
+                    audio_embeds, audio_frames = audio_encoder(audio_padded, attention_mask=audio_attention_mask, return_frames=True)
+                    # Speaker embed (ECAPA-TDNN)
+                    speaker_embeds = speaker_norm.encode_speaker(audio_padded)
+                    
+                # Save individually with directory hierarchy preserved
+                for j, path in enumerate(batch_files):
+                    if data_root is not None and data_root in path.parents:
+                        rel = path.relative_to(data_root)
+                        pt_path = out_path / rel.with_suffix('.pt')
+                    else:
+                        pt_path = out_path / path.parent.name / path.with_suffix('.pt').name
+                    
+                    pt_path.parent.mkdir(parents=True, exist_ok=True)
+                    
+                    # Trim audio_frames to the valid length for this specific waveform (50 frames/sec for 16kHz audio)
+                    saved_frames = None
+                    if audio_frames is not None:
+                        n_valid_frames = max(1, int(round(waveforms[j].shape[-1] / 320.0)))
+                        saved_frames = audio_frames[j, :n_valid_frames].cpu().clone()
+
+                    data = {
+                        "audio": audio_embeds[j].cpu().clone(),
+                        "speaker": speaker_embeds[j].cpu().clone(),
+                        "audio_frames": saved_frames,
+                    }
+                    torch.save(data, pt_path)
+
+                if (b_idx + 1) % 25 == 0 or (b_idx + 1) == total_batches:
+                    processed_count = min(i + batch_size, len(pending_files))
+                    logger.info(f"Feature extraction progress: {processed_count}/{len(pending_files)} files ({100*processed_count/len(pending_files):.1f}%)")
+                    sys.stdout.flush()
+                    
         logger.info("Extraction complete!")
+        sys.stdout.flush()
     finally:
         if old_pt_dir is not None:
             os.environ["CONFLICTNET_PT_DIR"] = old_pt_dir
