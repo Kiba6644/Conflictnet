@@ -105,7 +105,7 @@ def parse_args(argv=None):
     p.add_argument("--embed_dim", type=int, default=256)
     p.add_argument("--batch_size", type=int, default=None)
     p.add_argument("--epochs", type=int, default=None)
-    p.add_argument("--amp", action="store_true", help="Enable automatic mixed precision (overrides config)")
+    p.add_argument("--no_amp", action="store_true", help="Disable automatic mixed precision (fp16/bf16) training")
     p.add_argument("--compile", action="store_true", help="Enable torch.compile (overrides config)")
     p.add_argument("--pretrain_epochs", type=int, default=5)
     p.add_argument("--lr", type=float, default=2e-5)
@@ -197,6 +197,9 @@ def main():
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
 
     # Define this before dataset construction: MELD/MUStARD dataset constructors
     # initialise a Hugging Face tokenizer, so starting the model warm-up later is
@@ -572,6 +575,15 @@ def main():
 
     exp_config = ExperimentConfig.from_args(args)
     cfg = exp_config.to_dict()
+    if getattr(args, "no_amp", False):
+        cfg["amp"] = False
+    else:
+        cfg["amp"] = True
+    if getattr(args, "compile", False):
+        cfg["compile"] = True
+    if args.epochs is not None:
+        cfg["epochs"] = args.epochs
+
     trainer = ConflictNetTrainer(
         model=model,
         train_loader=train_loader,
@@ -587,12 +599,6 @@ def main():
         start_epoch = trainer.load_checkpoint(args.resume_from)
 
     retries = 0
-    if args.epochs is not None:
-        cfg["epochs"] = args.epochs
-    if args.amp:
-        cfg["amp"] = True
-    if args.compile:
-        cfg["compile"] = True
 
     while True:
         trainer.train(n_epochs=args.epochs or cfg.get("epochs", 30), pretrain_epochs=args.pretrain_epochs, start_epoch=start_epoch)

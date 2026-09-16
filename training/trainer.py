@@ -141,6 +141,7 @@ class ConflictNetTrainer:
         self.grad_scaler: Optional[torch.amp.GradScaler] = None
         if self.use_amp:
             self.grad_scaler = torch.amp.GradScaler("cuda")
+        logger.info(f"[Trainer] Automatic Mixed Precision (AMP): {self.use_amp} (device={device})")
 
         self._setup_optimizer()
         self._setup_wandb()

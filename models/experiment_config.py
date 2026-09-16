@@ -40,7 +40,7 @@ class ExperimentConfig:
     gradient_accumulation_steps: int = 1
     early_stop_patience: int = 10
     seed: int = 42
-    amp: bool = False
+    amp: bool = True
 
     # ── Ablation toggles ────────────────────────────────────────────────
     use_speaker_norm: bool = True
@@ -92,6 +92,7 @@ class ExperimentConfig:
             "no_speaker_adaptive_threshold": "use_speaker_adaptive_threshold",
             "no_baseline_subtract": "use_baseline_subtract",
             "no_word_divergence": "use_word_divergence",
+            "no_amp": "amp",
             "use_adaptive_router": "use_adaptive_router",  # direct passthrough (no negation)
         }
 
@@ -118,6 +119,7 @@ class ExperimentConfig:
             "use_speaker_adaptive_threshold": "no_speaker_adaptive_threshold",
             "use_baseline_subtract": "no_baseline_subtract",
             "use_word_divergence": "no_word_divergence",
+            "amp": "no_amp",
         }
 
         for field_name in (f.name for f in dataclasses.fields(self)):
