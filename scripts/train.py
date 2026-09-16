@@ -472,14 +472,9 @@ def main():
     train_set = ConcatDataset(train_datasets)
     val_set = ConcatDataset(val_datasets)
 
-    # Use 8 workers to max out CPU I/O, but use 'spawn' context to avoid Docker's strict fork semaphore limits
-    optimal_workers = 8
-    
-    import torch.multiprocessing as mp
-    try:
-        mp.set_start_method('spawn', force=True)
-    except RuntimeError:
-        pass
+    # Docker 64MB SHM limit reached: 8 workers * 2 prefetch * 15MB/batch = 240MB. 
+    # Forced to use 0 workers to bypass SHM entirely.
+    optimal_workers = 0
     
     from torch.utils.data.distributed import DistributedSampler
     train_sampler = DistributedSampler(train_set) if local_rank != -1 else None
