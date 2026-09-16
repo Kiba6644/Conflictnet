@@ -56,12 +56,20 @@ def compute_all_metrics(
         else:
             type_names = [f"class_{i}" for i in range(n_types)]
 
-    # Binary predictions via threshold
-    preds_type = (probs_type >= type_threshold).astype(int)
-
-    # F1 across types
-    metrics["macro_f1"] = f1_score(labels_type, preds_type, average="macro", zero_division=0)
-    metrics["weighted_f1"] = f1_score(labels_type, preds_type, average="weighted", zero_division=0)
+    # Detect mutually exclusive single-label datasets (e.g. MELD, CREMA-D)
+    # If every row sums to <= 1, it's single-label.
+    is_single_label = (labels_type.sum(axis=1) <= 1).all()
+    
+    if is_single_label:
+        y_true_cls = np.argmax(labels_type, axis=1)
+        y_pred_cls = np.argmax(probs_type, axis=1)
+        metrics["macro_f1"] = float(f1_score(y_true_cls, y_pred_cls, average="macro", zero_division=0))
+        metrics["weighted_f1"] = float(f1_score(y_true_cls, y_pred_cls, average="weighted", zero_division=0))
+    else:
+        # Binary predictions via threshold for multi-label
+        preds_type = (probs_type >= type_threshold).astype(int)
+        metrics["macro_f1"] = float(f1_score(labels_type, preds_type, average="macro", zero_division=0))
+        metrics["weighted_f1"] = float(f1_score(labels_type, preds_type, average="weighted", zero_division=0))
 
     # Per-type metrics
     for i, name in enumerate(type_names[:n_types]):

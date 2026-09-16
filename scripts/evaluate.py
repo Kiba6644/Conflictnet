@@ -172,6 +172,9 @@ def main():
                 precomputed_audio_embed=precomputed_audio_embed,
                 precomputed_speaker_embed=precomputed_speaker_embed,
                 precomputed_audio_frames=batch_gpu.get("audio_frames"),
+                dataset_names=batch.get("dataset_names"),
+                word_timestamps=batch.get("word_timestamps"),
+                token_word_boundaries=batch.get("token_word_boundaries"),
             )
             all_probs.append(out.probs_type.cpu().numpy())
             all_labels.append(batch["conflict_type_labels"].numpy())
@@ -216,9 +219,15 @@ def main():
             "dialect": [str(d) if d is not None else "unknown" for d in all_dialects],
             "emotion_intensity": [str(i) if i is not None else "unknown" for i in all_intensities],
         }
-        binary_pred = (all_probs >= 0.5).any(axis=1).astype(int)
-        binary_true = all_labels.any(axis=1).astype(int)
-        fairness_report = fairness_audit(binary_pred, binary_true, sensitive_dict)
+        # Use conflict indices (0, 1, 2 = anger, disgust, fear)
+        _n_conflict = min(3, all_labels.shape[1])
+        binary_true = all_labels[:, :_n_conflict].any(axis=1).astype(int)
+        binary_pred = (all_probs[:, :_n_conflict] >= 0.5).any(axis=1).astype(int)
+        
+        try:
+            fairness_report = fairness_audit(binary_pred, binary_true, sensitive_dict)
+        except ValueError as e:
+            logger.warning(f"Fairness audit skipped: {e}")
         if "gender" in fairness_report:
             logger.info(f"[Fairness] Gender Disparity={fairness_report['gender']['disparity']:.4f}")
         with open(out_dir / "fairness.json", "w") as f:
