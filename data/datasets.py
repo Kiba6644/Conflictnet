@@ -126,7 +126,11 @@ def load_audio(path: str, target_sr: int = SAMPLE_RATE, max_len: float = MAX_AUD
 
     max_samples = int(max_len * target_sr)
     waveform = waveform[:, :max_samples]
-    return waveform.squeeze(0)  # (T,)
+    waveform = waveform.squeeze(0)  # (T,)
+    # Normalize to zero-mean unit-variance as expected by WavLM/Wav2Vec2 feature extractor
+    if waveform.std() > 1e-5:
+        waveform = (waveform - waveform.mean()) / (waveform.std() + 1e-7)
+    return waveform
 
 
 def tokenize(
@@ -862,8 +866,12 @@ class MELDDataset(Dataset):
                     type_labels[EMOTION_IDX_DISGUST] = 1
                 elif emotion == "fear":
                     type_labels[EMOTION_IDX_FEAR] = 1
-                elif emotion in ("joy", "surprise"):
+                elif emotion == "joy":
                     type_labels[EMOTION_IDX_HAPPINESS] = 1
+                elif emotion == "surprise":
+                    # Map surprise to neutral slot is least-bad option given 6-class schema.
+                    # Surprise in MELD is mostly negative/shocked, closer to neutral than joy.
+                    type_labels[EMOTION_IDX_NEUTRAL] = 1
                 elif emotion == "sadness":
                     type_labels[EMOTION_IDX_SADNESS] = 1
                 else:  # neutral

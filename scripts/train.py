@@ -137,7 +137,7 @@ def parse_args(argv=None):
                    help="Max times to continue training if below target_f1")
     p.add_argument("--resume_epochs", type=int, default=10,
                    help="Additional epochs per retry")
-    p.add_argument("--label_smoothing", type=float, default=0.05,
+    p.add_argument("--label_smoothing", type=float, default=0.0,
                    help="Label smoothing epsilon for conflict type BCE loss (0 = disabled)")
     p.add_argument("--use_adaptive_router", action="store_true",
                    help="Enable learned modality router alpha gate (text vs audio weighting)")

@@ -44,7 +44,7 @@ def get_warmup_cosine_scheduler(
     def lr_lambda(step: int) -> float:
         if step < num_warmup_steps:
             return step / max(1, num_warmup_steps)
-        progress = (step - num_warmup_steps) / max(1, num_training_steps - num_warmup_steps)
+        progress = min(1.0, (step - num_warmup_steps) / max(1, num_training_steps - num_warmup_steps))
         return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
 
     return LambdaLR(optimizer, lr_lambda)
@@ -168,7 +168,7 @@ class ConflictNetTrainer:
         if hasattr(torch.optim.AdamW, "__init__") and "fused" in AdamW.__init__.__code__.co_varnames:
             kwargs["fused"] = True
 
-        no_decay = {"bias", "layer_norm.weight", "layernorm.weight", "LayerNorm.weight"}
+        no_decay = {"bias", "layer_norm.weight", "layernorm.weight", "LayerNorm.weight", "log_vars"}
 
         # Layer-wise Learning Rate Decay (LLRD) — all groups expressed as ratios of base lr
         # so that --lr correctly scales the entire schedule.
@@ -324,6 +324,9 @@ class ConflictNetTrainer:
 
     def train_epoch(self, epoch: int, pretraining: bool = False) -> Dict[str, float]:
         self.model.train()
+        # Set pretraining flag on model so swap objective is gated correctly
+        _model_inner = getattr(self.model, 'module', self.model)
+        _model_inner._is_pretraining = pretraining
         self._progressive_unfreeze(epoch)
         total_loss = 0.0
         n_batches = 0
@@ -664,15 +667,19 @@ class ConflictNetTrainer:
                         pass
             macro_ap = float(np.mean(per_class_ap)) if per_class_ap else 0.0
 
-            # --- Multi-label F1 at fixed 0.5 threshold (drives checkpoint selection) ---
+            # --- Single-label argmax F1 (PRIMARY metric for model selection) ---
+            # MELD is a mutually-exclusive single-label dataset. argmax gives the
+            # correct predicted class; threshold-based multi-label eval destroys F1
+            # when max prob < 0.5 (very common with 6-way softmax-like distribution).
             from sklearn.metrics import f1_score as _f1
-            f1_macro    = _f1(labels, (probs >= 0.5).astype(int), average="macro",    zero_division=0)
-            f1_weighted = _f1(labels, (probs >= 0.5).astype(int), average="weighted", zero_division=0)
+            y_true_cls = np.argmax(labels, axis=1)   # (N,) integer class indices
+            y_pred_cls = np.argmax(probs, axis=1)     # (N,) integer class indices
+            f1_weighted = _f1(y_true_cls, y_pred_cls, average="weighted", zero_division=0)
+            f1_macro    = _f1(y_true_cls, y_pred_cls, average="macro",    zero_division=0)
 
-            # --- Calibrated per-class threshold sweep ---
-            # A single shared threshold is swept; per-class thresholds would leak more aggressively.
+            # --- Calibrated per-class threshold sweep (kept for analysis / multi-label ablation) ---
             best_class_thresh = 0.5
-            best_f1_weighted_cal = f1_weighted
+            best_f1_weighted_cal = f1_weighted  # start from argmax baseline
             for _thresh in np.arange(0.05, 0.96, 0.05):
                 _preds = (probs >= _thresh).astype(int)
                 _f1w_true = _f1(labels, _preds, average="weighted", zero_division=0)
@@ -680,7 +687,7 @@ class ConflictNetTrainer:
                     best_f1_weighted_cal = _f1w_true
                     best_class_thresh = float(_thresh)
             self._best_class_thresh = best_class_thresh
-            f1_macro_cal    = _f1(labels, (probs >= best_class_thresh).astype(int), average="macro",    zero_division=0)
+            f1_macro_cal    = _f1(y_true_cls, y_pred_cls, average="macro",    zero_division=0)
             f1_weighted_cal = best_f1_weighted_cal
 
             metrics = {
@@ -894,15 +901,21 @@ class ConflictNetTrainer:
             return
 
         # 1. Model weights → safetensors (primary, pickle-free)
+        # EMA model is used for weight averaging (all params have requires_grad=False).
+        # We save EMA weights (better generalization) but use the LIVE model to identify
+        # which keys are trainable (EMA wraps everything as non-trainable).
         model_for_state = self.ema_model.module
         if hasattr(model_for_state, "module"):
             model_for_state = model_for_state.module
-            
+
+        # Use the live (non-EMA) model to get trainable key names
+        raw_model = self.model.module if hasattr(self.model, "module") else self.model
+        trainable_keys = {name for name, param in raw_model.named_parameters() if param.requires_grad}
+
         # Optimization: Only save trainable parameters! Frozen encoders take up 1.5GB 
         # of disk space and take forever to serialize on Kaggle's slow EBS drives.
         full_state = model_for_state.state_dict()
-        trainable_keys = {name for name, param in model_for_state.named_parameters() if param.requires_grad}
-        model_state = {k: v for k, v in full_state.items() if k in trainable_keys or not any(k.startswith(p_name) for p_name in [n for n, p in model_for_state.named_parameters()])}
+        model_state = {k: v for k, v in full_state.items() if k in trainable_keys}
         
         try:
             from safetensors.torch import save_file as st_save

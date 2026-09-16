@@ -683,9 +683,12 @@ class ConflictNet(nn.Module):
             else:
                 losses.append((severity * 0.0).sum() if severity is not None else torch.tensor(0.0, device=audio.device))
 
-            # 6d. Self-supervised swap loss (pre-training only)
-            if self.swap_objective is not None:
+            # 6d. Self-supervised swap loss (pre-training phase only)
+            if self.swap_objective is not None and getattr(self, '_is_pretraining', False):
                 swap_loss = self.swap_objective(audio_embed, text_embed)
+                losses.append(swap_loss)
+            elif self.swap_objective is not None:
+                swap_loss = (audio_embed * 0.0).sum()
                 losses.append(swap_loss)
 
             loss, sigma_weights = self.multi_task_loss(losses)
@@ -701,7 +704,9 @@ class ConflictNet(nn.Module):
             # 6e. Router entropy regularisation (penalises hard 0/1 collapse)
             if self.modality_router is not None and router_alpha is not None:
                 router_ent_loss = entropy_regularization_loss(router_alpha)
-                loss = loss + self.router_entropy_reg * router_ent_loss
+                # Subtract to MAXIMIZE entropy: prevents alpha from collapsing to 0 or 1
+                # which would zero out one entire modality (audio or text).
+                loss = loss - self.router_entropy_reg * router_ent_loss
                 loss_breakdown["router_entropy"] = router_ent_loss.detach().item()
 
         return ConflictNetOutput(
