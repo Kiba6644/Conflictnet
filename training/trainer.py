@@ -75,12 +75,6 @@ class ConflictNetTrainer:
     ):
         self.model = model.to(device)
 
-        # PyTorch 2.x compile support
-        self.use_compile = cfg.get("compile", False) and hasattr(torch, "compile")
-        if self.use_compile:
-            logger.info("Using torch.compile() for model speedup.")
-            self.model = torch.compile(self.model)
-
         # Multi-GPU DataParallel / DDP support
         if "cuda" in device:
             import os
@@ -122,6 +116,12 @@ class ConflictNetTrainer:
                 )
                 logger.info(f"[DDP] Rank {local_rank}: model wrapper initialized (broadcast_buffers=False).")
             # Note: nn.DataParallel is intentionally disabled as it cannot scatter/gather custom dataclasses.
+
+        # PyTorch 2.x compile support (Must be applied AFTER DDP wrapping for reducer bucket alignment)
+        self.use_compile = cfg.get("compile", False) and hasattr(torch, "compile")
+        if self.use_compile:
+            logger.info("Using torch.compile() for model speedup.")
+            self.model = torch.compile(self.model)
 
         # cuDNN benchmark for faster convolutions (useful if input sizes are static)
         if "cuda" in device:
