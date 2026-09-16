@@ -209,7 +209,11 @@ class WavLMWeightedEncoder(nn.Module):
             enc = WavLMModel.from_pretrained(
                 model_name,
                 output_hidden_states=True,
+                layerdrop=0.0,
             )
+            enc.config.layerdrop = 0.0
+            if hasattr(enc, "encoder") and hasattr(enc.encoder, "layerdrop"):
+                enc.encoder.layerdrop = 0.0
             # First freeze everything
             if freeze:
                 for p in enc.parameters():
