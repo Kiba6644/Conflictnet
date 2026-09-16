@@ -690,7 +690,7 @@ class ConflictNet(nn.Module):
                 losses.append(torch.zeros(1, device=audio.device if audio is not None else "cpu").squeeze())
 
             # 6d. Self-supervised swap loss (pre-training phase only)
-            if self.swap_objective is not None and getattr(self, '_is_pretraining', False):
+            if self.swap_objective is not None and pretraining:
                 swap_loss = self.swap_objective(audio_embed, text_embed)
                 losses.append(swap_loss)
             elif self.swap_objective is not None:
