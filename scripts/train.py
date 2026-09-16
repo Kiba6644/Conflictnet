@@ -599,9 +599,18 @@ def main():
 
         if local_rank in (-1, 0):
             logger.info("⚡ Running final evaluation on best model...")
-            trainer.load_checkpoint(Path(args.output_dir) / "best_model.safetensors")
+            # Try best_model first, fall back to latest_model if missing
+            _best_ckpt = Path(args.output_dir) / "best_model.safetensors"
+            _latest_ckpt = Path(args.output_dir) / "latest_model.safetensors"
+            if _best_ckpt.exists():
+                trainer.load_checkpoint(_best_ckpt)
+            elif _latest_ckpt.exists():
+                logger.warning("best_model.safetensors not found, falling back to latest_model.safetensors")
+                trainer.load_checkpoint(_latest_ckpt)
+            else:
+                logger.warning("No checkpoint found for final evaluation, using current model state.")
             final_metrics = trainer.evaluate()
-            
+
             print("\n📊 FINAL DETAILED EVALUATION RESULTS:")
             print("-" * 30)
             for k, v in final_metrics.items():
