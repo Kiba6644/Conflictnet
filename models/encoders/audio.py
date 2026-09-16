@@ -279,11 +279,11 @@ class WavLMWeightedEncoder(nn.Module):
         # hidden_states: tuple of (B, T, D) — one per layer including embedding
         hidden_states = out.hidden_states  # tuple of n_layers tensors
 
-        # Stack: (n_layers, B, T, D)
-        stacked = torch.stack([h.float() for h in hidden_states], dim=0)
+        # Stack: (n_layers, B, T, D) in native mixed-precision dtype (saves 50% VRAM & bandwidth)
+        stacked = torch.stack(list(hidden_states), dim=0)
 
         # Softmax-weighted sum over layers: (B, T, D)
-        weights = F.softmax(self.layer_weights, dim=0)  # (n_layers,)
+        weights = F.softmax(self.layer_weights.to(stacked.dtype), dim=0)  # (n_layers,)
         weighted = (stacked * weights.view(-1, 1, 1, 1)).sum(dim=0)  # (B, T, D)
 
         pooled = self._masked_pool(weighted, attention_mask)  # (B, D)

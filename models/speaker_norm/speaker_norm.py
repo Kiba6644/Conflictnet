@@ -395,11 +395,14 @@ class SpeakerNormalizer(nn.Module):
         # from synchronising its frozen weights), so ``ConflictNet.to(...)``
         # does not move it. Move it lazily on first use to match the batch.
         try:
-            model_device = next(model.parameters()).device
-            if model_device != audio.device:
+            if hasattr(model, "mods"):
+                model.mods.to(audio.device)
+            if hasattr(model, "device"):
+                model.device = audio.device
+            elif hasattr(model, "to"):
                 model.to(audio.device)
-        except (AttributeError, StopIteration):
-            logger.warning("[SpeakerNorm] Could not determine ECAPA device; disabling speaker embedding")
+        except Exception as e:
+            logger.warning(f"[SpeakerNorm] Could not set ECAPA device ({e}); disabling speaker embedding")
             return torch.zeros(audio.size(0), self._spk_embed_dim, device=audio.device)
         embeddings = model.encode_batch(audio)  # (B, 1, 192)
         return embeddings.squeeze(1)            # (B, 192)
