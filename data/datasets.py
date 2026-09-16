@@ -1057,7 +1057,7 @@ class MELDDataset(Dataset):
             "gender": item["gender"],
             "text": item["text"],
             "utterance_id": Path(item["wav_path"]).stem,
-            "conversation_id": f"meld_{item['dialogue_id']}",
+            "conversation_id": f"meld_{self.split}_{item['dialogue_id']}",
             "turn_index": item.get("turn_index", 0),
             "word_timestamps": word_timestamps,
             "token_word_boundaries": token_word_boundaries,
@@ -1500,26 +1500,26 @@ def _collate_core(
             max_f = max(b["audio"]["audio_frames"].shape[0] for b in batch if isinstance(b["audio"], dict) and b["audio"].get("audio_frames") is not None)
             D = next(b["audio"]["audio_frames"].shape[1] for b in batch if isinstance(b["audio"], dict) and b["audio"].get("audio_frames") is not None)
             audio_frames_padded = torch.zeros(len(batch), max_f, D)
-            audio_attention_mask = torch.zeros(len(batch), max_f, dtype=torch.bool)
+            audio_attention_mask = torch.zeros(len(batch), max_f, dtype=torch.long)
             for i, b in enumerate(batch):
                 if isinstance(b["audio"], dict) and b["audio"].get("audio_frames") is not None:
                     f = b["audio"]["audio_frames"]
                     t = f.shape[0]
                     audio_frames_padded[i, :t] = f
-                    audio_attention_mask[i, :t] = True
+                    audio_attention_mask[i, :t] = 1
         else:
             audio_frames_padded = None
-            audio_attention_mask = torch.ones(len(batch), 1, dtype=torch.bool)
+            audio_attention_mask = torch.ones(len(batch), 1, dtype=torch.long)
     else:
         speaker_padded = None
         audio_frames_padded = None
         max_len = max(b["audio"].shape[0] for b in batch)
         audio_padded = torch.zeros(len(batch), max_len)
-        audio_attention_mask = torch.zeros(len(batch), max_len, dtype=torch.bool)
+        audio_attention_mask = torch.zeros(len(batch), max_len, dtype=torch.long)
         for i, b in enumerate(batch):
             t = b["audio"].shape[0]
             audio_padded[i, :t] = b["audio"]
-            audio_attention_mask[i, :t] = True
+            audio_attention_mask[i, :t] = 1
 
     # Look up or default prosody z-scores
     # Keys match utterance_id from each dataset's __getitem__ (audio file stem).

@@ -101,6 +101,10 @@ class DialogueDistributedBatchSampler(Sampler):
             if len(global_batch) < global_batch_size:
                 if self.drop_last:
                     break
+                elif self.num_replicas == 1:
+                    # Single-replica (validation): emit partial batch as-is.
+                    # Do not pad with duplicates — they would be counted in metrics.
+                    pass
                 else:
                     pad_size = global_batch_size - len(global_batch)
                     if len(global_batch) > 0:

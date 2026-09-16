@@ -106,7 +106,7 @@ def parse_args(argv=None):
     p.add_argument("--compile", action="store_true", help="Enable torch.compile (overrides config)")
     p.add_argument("--pretrain_epochs", type=int, default=5)
     p.add_argument("--lr", type=float, default=2e-5)
-    p.add_argument("--warmup_steps", type=int, default=500)
+    p.add_argument("--warmup_steps", type=int, default=150)
     p.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--no_speaker_norm", action="store_true")
     p.add_argument("--no_temporal", action="store_true",
@@ -354,7 +354,7 @@ def main():
     augmentor = AudioAugmentor(
         sample_rate=16000,
         musan_path=getattr(args, "musan_path", None),
-        speed_perturb=True,
+        speed_perturb=False,  # Disabled: desynchronizes prosody_z and MFA word timestamps
         additive_noise=True,
         time_mask=True,
         p=getattr(args, "augment_p", 0.5),

@@ -250,7 +250,10 @@ class ConflictNet(nn.Module):
         # For Neutral: (1 - 0.47) / 0.47 = ~1.1
         # For Disgust: (1 - 0.03) / 0.03 = ~32.0
         # For Anger: (1 - 0.11) / 0.11 = ~8.0
-        pos_w = torch.tensor([8.0, 32.0, 32.0, 5.0, 1.1, 13.0])
+        # Capped inverse-frequency weights for [anger, disgust, fear, joy, neutral, sadness]
+        # After surprise->neutral remapping, neutral is ~59% so its weight is reduced.
+        # Caps at 3.0 to prevent extreme logit bias under focal loss + argmax eval.
+        pos_w = torch.tensor([2.0, 3.0, 3.0, 1.5, 0.6, 2.5])
         # If n_conflict_types is different (e.g. MUStARD + sarcasm), pad with 3.0
         if n_conflict_types != 6:
             pos_w_padded = torch.full((n_conflict_types,), 3.0)
@@ -675,13 +678,15 @@ class ConflictNet(nn.Module):
 
 
             # 6c. Severity MSE loss
-            if severity is not None and severity_labels is not None:
+            dataset_names_flat = [d for ds in (dataset_names or [[]]) for d in ds] if dataset_names else []
+            has_real_severity = any(d in ("iemocap", "cremad") for d in dataset_names_flat)
+            if severity is not None and severity_labels is not None and has_real_severity:
                 sev_target = severity_labels.float().view(-1)
                 sev_pred = severity.view(-1)
                 sev_loss = nn.functional.mse_loss(sev_pred, sev_target)
                 losses.append(sev_loss)
             else:
-                losses.append((severity * 0.0).sum() if severity is not None else torch.tensor(0.0, device=audio.device))
+                losses.append(torch.zeros(1, device=audio.device if audio is not None else "cpu").squeeze())
 
             # 6d. Self-supervised swap loss (pre-training phase only)
             if self.swap_objective is not None and getattr(self, '_is_pretraining', False):

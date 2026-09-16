@@ -116,7 +116,14 @@ class CrossModalAttention(nn.Module):
             # But Wait: if the user passes the mask for the raw waveform, it's 160000 long!
             # We should just use a length-based mask.
             lengths = audio_attention_mask.sum(dim=1)
-            frame_lengths = torch.ceil(lengths / 320.0).long()
+            # Guard: if mask is already at frame resolution (e.g. precomputed features),
+            # do NOT divide by stride 320 (that would give frame_length=1 and mask all frames).
+            if audio_attention_mask.size(1) > a_seq.size(1):
+                # Raw waveform mask: convert sample-level lengths to frame-level
+                frame_lengths = torch.ceil(lengths / 320.0).long()
+            else:
+                # Already frame-level mask (precomputed features)
+                frame_lengths = lengths.long()
             max_f = a_seq.size(1)
             idx = torch.arange(max_f, device=device).unsqueeze(0)
             valid_a = idx >= frame_lengths.unsqueeze(1)

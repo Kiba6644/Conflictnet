@@ -303,24 +303,33 @@ class ConflictNetTrainer:
 
         # Unfreeze last `target` layers
         unfreeze_from = n_total - target
+        new_params = []
         for i, layer in enumerate(transformer_layers):
             if i >= unfreeze_from:
                 for p in layer.parameters():
-                    p.requires_grad = True
+                    if not p.requires_grad:
+                        p.requires_grad = True
+                        new_params.append(p)
 
         logger.info(
             f"[Progressive Unfreeze] Epoch {epoch}: "
             f"{'all frozen' if target == 0 else f'unfreezing layers {unfreeze_from}–{n_total-1} ({target} layers)'}"
         )
 
-        # Re-setup optimizer and restore scheduler state
-        if hasattr(self, "scheduler") and self.scheduler is not None:
-            saved_last_epoch = self.scheduler.last_epoch
-            self._setup_optimizer()
-            for _ in range(saved_last_epoch):
-                self.scheduler.step()
-        else:
-            self._setup_optimizer()
+        # Add newly unfrozen parameters to the EXISTING optimizer as a new param group.
+        # Do NOT recreate the optimizer — that destroys all Adam first/second moment
+        # buffers for all parameters, causing a massive loss spike.
+        if new_params and hasattr(self, "optimizer"):
+            base_lr = self.cfg.get("lr", 3e-5)
+            self.optimizer.add_param_group({
+                "params": new_params,
+                "lr": base_lr * (1.0 / 6.0),  # conservative LR for new WavLM layers
+                "weight_decay": 0.01,
+            })
+            logger.info(
+                f"[Progressive Unfreeze] Added {len(new_params)} new params to optimizer "
+                f"at lr={base_lr * (1.0/6.0):.2e}"
+            )
 
     def train_epoch(self, epoch: int, pretraining: bool = False) -> Dict[str, float]:
         self.model.train()
