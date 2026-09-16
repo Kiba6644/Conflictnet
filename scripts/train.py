@@ -104,6 +104,7 @@ def parse_args(argv=None):
                    help="Path to local text encoder directory to bypass HuggingFace")
     p.add_argument("--embed_dim", type=int, default=256)
     p.add_argument("--batch_size", type=int, default=None)
+    p.add_argument("--epochs", type=int, default=None)
     p.add_argument("--amp", action="store_true", default=True,
                    help="Enable automatic mixed precision (enabled by default)")
     p.add_argument("--no_amp", action="store_true",
