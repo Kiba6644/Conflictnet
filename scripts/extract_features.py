@@ -10,6 +10,7 @@ import logging
 import sys
 import os
 from pathlib import Path
+from typing import List, Optional
 
 # Add project root to Python path so we can import models/data
 sys.path.append(str(Path(__file__).parent.parent))
