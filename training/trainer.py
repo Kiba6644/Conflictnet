@@ -121,9 +121,7 @@ class ConflictNetTrainer:
                     broadcast_buffers=False,
                 )
                 logger.info(f"[DDP] Rank {local_rank}: model wrapper initialized (broadcast_buffers=False).")
-            elif $false:
-                logger.info(f"Using DataParallel across {torch.cuda.device_count()} GPUs.")
-                self.model = nn.DataParallel(self.model)
+            # Note: nn.DataParallel is intentionally disabled as it cannot scatter/gather custom dataclasses.
 
         # cuDNN benchmark for faster convolutions (useful if input sizes are static)
         if "cuda" in device:
