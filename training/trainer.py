@@ -303,32 +303,15 @@ class ConflictNetTrainer:
 
         # Unfreeze last `target` layers
         unfreeze_from = n_total - target
-        new_params = []
         for i, layer in enumerate(transformer_layers):
             if i >= unfreeze_from:
                 for p in layer.parameters():
-                    if not p.requires_grad:
-                        p.requires_grad = True
-                        new_params.append(p)
+                    p.requires_grad = True
 
-        logger.info(
-            f"[Progressive Unfreeze] Epoch {epoch}: "
-            f"{'all frozen' if target == 0 else f'unfreezing layers {unfreeze_from}–{n_total-1} ({target} layers)'}"
-        )
-
-        # Add newly unfrozen parameters to the EXISTING optimizer as a new param group.
-        # Do NOT recreate the optimizer — that destroys all Adam first/second moment
-        # buffers for all parameters, causing a massive loss spike.
-        if new_params and hasattr(self, "optimizer"):
-            base_lr = self.cfg.get("lr", 3e-5)
-            self.optimizer.add_param_group({
-                "params": new_params,
-                "lr": base_lr * (1.0 / 6.0),  # conservative LR for new WavLM layers
-                "weight_decay": 0.01,
-            })
+        if current != target:
             logger.info(
-                f"[Progressive Unfreeze] Added {len(new_params)} new params to optimizer "
-                f"at lr={base_lr * (1.0/6.0):.2e}"
+                f"[Progressive Unfreeze] Epoch {epoch}: "
+                f"unfreezing layers {unfreeze_from}-{n_total-1} ({target} layers)"
             )
 
     def train_epoch(self, epoch: int, pretraining: bool = False) -> Dict[str, float]:
@@ -452,7 +435,7 @@ class ConflictNetTrainer:
 
             # Update momentum queue if using contrastive loss
             _model_inner = getattr(self.model, "module", self.model)
-            cl = getattr(getattr(_model_inner, "alignment_module", None), "contrastive_loss", None)
+            cl = getattr(_model_inner, "contrastive_loss_fn", None)
             if cl is not None and hasattr(cl, "update_queue"):
                 import torch.distributed as dist
                 if dist.is_initialized():
@@ -612,6 +595,7 @@ class ConflictNetTrainer:
                     # fire any NCCL collective here. Rank 1 is idle at the metric
                     # broadcast; a DDP collective from rank 0 would have no
                     # partner and deadlock after 300 s.
+                    dataset_names_batch = batch.get("dataset_names", None)
                     output = _model_for_eval(
                     audio=batch["audio"],
                     input_ids=batch["input_ids"],
@@ -626,6 +610,7 @@ class ConflictNetTrainer:
                     speaker_roles=batch.get("speaker_roles"),
                     word_timestamps=batch.get("word_timestamps"),
                     token_word_boundaries=batch.get("token_word_boundaries"),
+                    dataset_names=dataset_names_batch,
                 )
                 if str_conv_ids and output.fused_embed is not None:
                     self.ctx_cache.batch_update(

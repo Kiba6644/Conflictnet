@@ -125,6 +125,7 @@ class CrossModalAttention(nn.Module):
                 # Already frame-level mask (precomputed features)
                 frame_lengths = lengths.long()
             max_f = a_seq.size(1)
+            frame_lengths = frame_lengths.clamp(min=1, max=max_f)
             idx = torch.arange(max_f, device=device).unsqueeze(0)
             valid_a = idx >= frame_lengths.unsqueeze(1)
         else:
@@ -260,7 +261,7 @@ class ContextGatedContrastiveLoss(nn.Module):
         tau = self.log_tau.exp()  # scalar (base)
         if context_pooled is not None:
             delta_tau = self.context_gate(context_pooled).squeeze(-1)  # (B,)
-            tau = (self.log_tau + delta_tau).exp()  # (B,) — per-sample temperature
+            tau = (self.log_tau + delta_tau).clamp(min=-4.6, max=2.3).exp()  # tau in [0.01, 10]
 
         # Expand similarity matrix with queue negatives if available
         B = audio_embeds.size(0)
@@ -297,6 +298,9 @@ class ContextGatedContrastiveLoss(nn.Module):
         if sarcasm_mask is not None and sarcasm_mask.any():
             labels = labels.clone()
             labels[sarcasm_mask] = -1   # cross_entropy ignore_index=-1
+        # Guard: if ALL labels are ignored (all-sarcasm batch), cross_entropy returns NaN (0/0).
+        if (labels == -1).all():
+            return torch.zeros(1, device=labels.device, requires_grad=True).squeeze()
         loss_a2t = F.cross_entropy(sim_a2t, labels, ignore_index=-1)
         loss_t2a = F.cross_entropy(sim_t2a, labels, ignore_index=-1)
         contrastive_loss = (loss_a2t + loss_t2a) / 2

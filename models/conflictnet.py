@@ -177,13 +177,15 @@ class MultiTaskLoss(nn.Module):
         total = self.log_vars.new_zeros(())  # scalar, same device as parameters
         weights = {}
         for i, loss in enumerate(losses):
-            precision = torch.exp(-self.log_vars[i])
+            # Clamp log_vars to prevent exp() overflow in FP16 (>11 overflows float16)
+            log_var_clamped = self.log_vars[i].clamp(min=-8.0, max=10.0)
+            precision = torch.exp(-log_var_clamped)
             # Always accumulate the log(sigma) regularisation term so log_vars[i]
             # always receives a gradient. Previously a loss.item()==0.0 early-exit
             # was skipping this for disabled tasks (e.g. severity), leaving
             # log_vars[2] frozen at its init value of 5.0 throughout training.
             loss_i = loss.to(self.log_vars.device)
-            total = total + precision * loss_i + 0.5 * self.log_vars[i]
+            total = total + precision * loss_i + 0.5 * log_var_clamped
             weights[f"sigma_task_{i}"] = torch.exp(self.log_vars[i] * 0.5).item()
         return total, weights
 
@@ -678,8 +680,7 @@ class ConflictNet(nn.Module):
 
 
             # 6c. Severity MSE loss
-            dataset_names_flat = [d for ds in (dataset_names or [[]]) for d in ds] if dataset_names else []
-            has_real_severity = any(d in ("iemocap", "cremad") for d in dataset_names_flat)
+            has_real_severity = any(d in ("iemocap", "cremad") for d in (dataset_names or []))
             if severity is not None and severity_labels is not None and has_real_severity:
                 sev_target = severity_labels.float().view(-1)
                 sev_pred = severity.view(-1)

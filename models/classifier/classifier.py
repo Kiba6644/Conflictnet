@@ -194,6 +194,10 @@ class ConflictClassifier(nn.Module):
         else:
             threshold = self.type_threshold
 
-        conflict_flag = (probs_type > threshold).any(dim=-1)  # (B,)
+        # Only check conflict emotion slots (anger=0, disgust=1, fear=2)
+        # Classes 3 (happiness), 4 (neutral), 5 (sadness) are NOT conflict emotions.
+        _n_conflict = min(3, probs_type.size(-1))
+        _thresh = threshold[:, :_n_conflict] if isinstance(threshold, torch.Tensor) else threshold
+        conflict_flag = (probs_type[:, :_n_conflict] > _thresh).any(dim=-1)  # (B,)
 
         return logits_type, probs_type, severity, conflict_flag

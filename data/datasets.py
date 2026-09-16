@@ -792,24 +792,30 @@ class MELDDataset(Dataset):
 
         # Hardcode split folder paths based on Kaggle MELD structure
         if split_name == "train":
-            split_folder = self.root / "train" / "train_splits"
-            if not split_folder.exists():
-                split_folder = self.root / "train"
+            _candidates = [
+                self.root / "train" / "train_splits",
+                self.root / "train",
+                self.root / "train_splits",
+                self.root,
+            ]
         elif split_name == "dev":
-            split_folder = self.root / "dev" / "dev_splits_complete"
-            if not split_folder.exists():
-                split_folder = self.root / "dev"
+            _candidates = [
+                self.root / "dev" / "dev_splits_complete",
+                self.root / "dev",
+                self.root / "dev_splits_complete",
+                self.root,
+            ]
         elif split_name == "test":
-            # Kaggle UI might truncate the name; check likely candidates
-            split_folder = self.root / "test" / "output_repeated_splits_test"
-            if not split_folder.exists():
-                split_folder = self.root / "test" / "output_repeated_splits"
-            if not split_folder.exists():
-                split_folder = self.root / "test" / "output_repeated_spl"
-            if not split_folder.exists():
-                split_folder = self.root / "test"
+            _candidates = [
+                self.root / "test" / "output_repeated_splits_test",
+                self.root / "test",
+                self.root / "output_repeated_splits_test",
+                self.root,
+            ]
         else:
-            split_folder = self.root / split_name
+            _candidates = [self.root]
+        split_folder = next((c for c in _candidates if c.exists()), self.root)
+        logger.info(f"[MELD] Using split folder: {split_folder}")
 
         items = []
         with open(csv_path, "r", encoding="utf-8") as f:
