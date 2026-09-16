@@ -1583,6 +1583,8 @@ def _collate_core(
     }
 
 
+import functools
+
 def make_collate_fn(
     augmentor: Any = None,
     prosody_lookup: Optional[Dict[str, torch.Tensor]] = None,
@@ -1595,10 +1597,7 @@ def make_collate_fn(
         train_collate = make_collate_fn(augmentor=AudioAugmentor())
         val_collate   = make_collate_fn()  # no augmentation
     """
-    def _collate(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
-        return _collate_core(batch, augmentor=augmentor, prosody_lookup=prosody_lookup)
-    return _collate
-
+    return functools.partial(_collate_core, augmentor=augmentor, prosody_lookup=prosody_lookup)
 
 # Backwards-compatible default (no augmentation)
 def conflictnet_collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
