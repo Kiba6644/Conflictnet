@@ -466,8 +466,8 @@ def main():
     train_set = ConcatDataset(train_datasets)
     val_set = ConcatDataset(val_datasets)
 
-    # Force num_workers=0 to prevent POSIX semaphore and SHM exhaustion on restricted Docker containers
-    optimal_workers = 0
+    # Try 2 workers: fast enough to speed up I/O, but small enough to hopefully fit in Docker's 64MB SHM limit
+    optimal_workers = 2
     
     from torch.utils.data.distributed import DistributedSampler
     train_sampler = DistributedSampler(train_set) if local_rank != -1 else None
