@@ -137,13 +137,14 @@ class MultiTaskLoss(nn.Module):
         super().__init__()
         self.log_vars = nn.Parameter(torch.zeros(n_tasks))
 
-    def forward(self, losses: List[torch.Tensor]) -> Tuple[torch.Tensor, Dict[str, float]]:
+    def forward(self, losses: List[torch.Tensor]) -> Tuple[torch.Tensor, Dict]:
         total = torch.tensor(0.0, device=self.log_vars.device)
         weights = {}
         for i, loss in enumerate(losses):
             precision = torch.exp(-self.log_vars[i])
             total = total + precision * loss + self.log_vars[i]
-            weights[f"sigma_task_{i}"] = torch.exp(self.log_vars[i] * 0.5).item()
+            # Keep as tensor — avoid .item() GPU sync in forward pass
+            weights[f"sigma_task_{i}"] = torch.exp(self.log_vars[i] * 0.5).detach()
         return total, weights
 
 
@@ -307,8 +308,15 @@ class ConflictNet(nn.Module):
             audio_frames: (B, T_audio, D) or None
             text_tokens:  (B, L_text, D) or None
         """
-        # Audio path — pass attention_mask to avoid padding contamination
-        audio_raw = self.audio_encoder(audio, attention_mask=audio_attention_mask, return_frames=return_frames)
+        # Audio path — pass attention_mask to avoid padding contamination.
+        # If the encoder is fully frozen, run it in eval() + no_grad to:
+        # (1) disable dropout on frozen weights (prevents feature corruption)
+        # (2) skip building the backward graph (saves memory + compute)
+        audio_frozen = not any(p.requires_grad for p in self.audio_encoder.parameters())
+        if audio_frozen:
+            self.audio_encoder.eval()
+        with torch.set_grad_enabled(not audio_frozen):
+            audio_raw = self.audio_encoder(audio, attention_mask=audio_attention_mask, return_frames=return_frames)
         if return_frames:
             audio_raw, audio_frames = audio_raw
         else:
@@ -319,8 +327,12 @@ class ConflictNet(nn.Module):
         if return_frames and audio_frames is not None:
             audio_frames = self.audio_proj(audio_frames)  # (B, T, D_raw) -> (B, T, embed_dim)
 
-        # Text path
-        text_raw = self.text_encoder(input_ids, attention_mask, return_tokens=return_tokens)
+        # Text path — same frozen-encoder optimizations as audio
+        text_frozen = not any(p.requires_grad for p in self.text_encoder.parameters())
+        if text_frozen:
+            self.text_encoder.eval()
+        with torch.set_grad_enabled(not text_frozen):
+            text_raw = self.text_encoder(input_ids, attention_mask, return_tokens=return_tokens)
         if return_tokens:
             text_raw, text_tokens = text_raw
         else:
@@ -491,13 +503,14 @@ class ConflictNet(nn.Module):
 
             loss, sigma_weights = self.multi_task_loss(losses)
             loss_breakdown = {
-                "contrastive": losses[0].detach().item(),
-                "type_bce": losses[1].detach().item(),
-                "severity_mse": losses[2].detach().item(),
+                # Keep as detached tensors — .item() moved to logging boundary in trainer
+                "contrastive": losses[0].detach(),
+                "type_bce": losses[1].detach(),
+                "severity_mse": losses[2].detach(),
                 **sigma_weights,
             }
             if self.swap_objective is not None:
-                loss_breakdown["swap"] = losses[3].detach().item()
+                loss_breakdown["swap"] = losses[3].detach()
 
         return ConflictNetOutput(
             logits_type=logits_type,

@@ -22,6 +22,11 @@ class DeBERTaEncoder(nn.Module):
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.output_dim = self.encoder.config.hidden_size  # 1024 for large
 
+        # Gradient checkpointing: trades recompute for memory — lets you run larger
+        # batches with DeBERTa-v3-large (400M params) without VRAM exhaustion.
+        # Must be set before LoRA so the base model checkpoints correctly.
+        self.encoder.gradient_checkpointing_enable()
+
         if use_lora:
             self._apply_lora(lora_r, lora_alpha)
 

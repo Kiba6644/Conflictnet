@@ -165,7 +165,8 @@ class ConflictNetTrainer:
                 ctx_embeds = None
                 ctx_padding = None
 
-            with torch.autocast(device_type=self.device, enabled=self.use_amp):
+            _amp_device = self.device.split(':')[0] if isinstance(self.device, str) else str(self.device).split(':')[0]
+            with torch.autocast(device_type=_amp_device, enabled=self.use_amp):
                 output = self.model(
                     audio=batch["audio"],
                     input_ids=batch["input_ids"],
@@ -214,15 +215,18 @@ class ConflictNetTrainer:
             else:
                 logger.debug("Skipping optimizer step, accumulating gradients")
 
-            total_loss += loss.item() * grad_accum_steps
+            # Use .detach() here (not .item()) so we NEVER sync CPU↔GPU mid-loop.
+            # .item() blocks until all queued GPU kernels finish, killing async pipelining.
+            # We accumulate as a tensor and only call .item() once at the end of the epoch.
+            total_loss += loss.detach() * grad_accum_steps
             n_batches += 1
 
             if self.global_step % 100 == 0 and self.global_step > 0:
-                metrics = {"train/loss": loss.item() * grad_accum_steps, "train/lr": self.scheduler.get_last_lr()[0]}
+                # .item() here is fine: logging is infrequent (every 100 steps)
+                metrics = {"train/loss": loss.detach().item() * grad_accum_steps, "train/lr": self.scheduler.get_last_lr()[0]}
                 if output.loss_breakdown:
                     for k, v in output.loss_breakdown.items():
-                        if isinstance(v, float):
-                            metrics[f"train/{k}"] = v
+                        metrics[f"train/{k}"] = v.item() if isinstance(v, torch.Tensor) else v
                 self._log(metrics, self.global_step)
 
         # Handle remaining gradients when epoch ends mid-accumulation
@@ -238,6 +242,9 @@ class ConflictNetTrainer:
             self.scheduler.step()
             self.global_step += 1
 
+        # Single .item() call at epoch end — only one GPU sync per epoch
+        if isinstance(total_loss, torch.Tensor):
+            total_loss = total_loss.item()
         return {"loss": total_loss / max(n_batches, 1)}
 
     @torch.no_grad()
@@ -259,7 +266,8 @@ class ConflictNetTrainer:
             ctx_embeds, ctx_padding, _ = self.ctx_cache.get_batch_context(
                 conv_ids, embed_dim=getattr(self.model, "embed_dim", 256)
             ) if conv_ids else (None, None, [])
-            with torch.autocast(device_type=self.device, enabled=self.use_amp):
+            _amp_device = self.device.split(':')[0] if isinstance(self.device, str) else str(self.device).split(':')[0]
+            with torch.autocast(device_type=_amp_device, enabled=self.use_amp):
                 output = self.model(
                 audio=batch["audio"],
                 input_ids=batch["input_ids"],

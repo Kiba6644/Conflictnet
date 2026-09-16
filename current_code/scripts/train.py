@@ -65,8 +65,13 @@ def parse_args(argv=None):
     p.add_argument("--resume_from", type=str, default=None)
     p.add_argument("--prosody_stats", type=str, default=None,
                    help="Path to .pt file from compute_prosody_stats.py with per-utterance z-scores")
-    p.add_argument("--amp", action="store_true",
-                   help="Enable automatic mixed precision (fp16) training")
+    p.add_argument("--no_amp", action="store_true",
+                   help="Disable automatic mixed precision (fp16) training")
+    p.add_argument("--compile", action="store_true",
+                   help="Use torch.compile() for up to 2x speedup (requires PyTorch 2.0+)")
+    p.add_argument("--num_workers", type=int, default=4,
+                   help="DataLoader worker processes. Use 0 to disable multiprocessing "
+                        "(fixes /dev/shm exhaustion in containers with small shm size).")
     return p.parse_args()
 
 
@@ -76,6 +81,7 @@ def main():
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
+        torch.backends.cudnn.benchmark = True  # auto-tune convolution algorithms
 
     # --- Build datasets ---
     from data.datasets import (
@@ -144,21 +150,33 @@ def main():
     train_set = ConcatDataset(train_datasets)
     val_set = ConcatDataset(val_datasets)
 
+    # persistent_workers=True keeps worker processes alive between epochs, so they
+    # don't need to re-acquire /dev/shm handles each iteration — this is the primary
+    # fix for "No space left on device (28)" shm exhaustion in container environments.
+    # prefetch_factor=2 caps the number of batches pre-fetched per worker, further
+    # bounding peak shm usage. Both are no-ops when num_workers=0 (single-process).
+    _use_persistent = args.num_workers > 0
+    _prefetch = 2 if args.num_workers > 0 else None
+
     train_loader = DataLoader(
         train_set,
         batch_size=args.batch_size,
         shuffle=True,
-        num_workers=4,
+        num_workers=args.num_workers,
         collate_fn=train_collate,
         pin_memory=True,
+        persistent_workers=_use_persistent,
+        prefetch_factor=_prefetch,
     )
     val_loader = DataLoader(
         val_set,
         batch_size=args.batch_size,
         shuffle=False,
-        num_workers=2,
+        num_workers=min(args.num_workers, 2),
         collate_fn=val_collate,
         pin_memory=True,
+        persistent_workers=_use_persistent,
+        prefetch_factor=_prefetch,
     )
 
     logger.info(f"Train samples: {len(train_set)} | Val samples: {len(val_set)}")
@@ -181,6 +199,13 @@ def main():
     param_counts = model.count_parameters()
     total_trainable = sum(v["trainable"] for v in param_counts.values())
     logger.info(f"Total trainable parameters: {total_trainable:,}")
+
+    if args.compile:
+        try:
+            model = torch.compile(model)
+            logger.info("[torch.compile] Model compiled successfully")
+        except Exception as e:
+            logger.warning(f"[torch.compile] Failed to compile model: {e}")
 
     # --- Trainer ---
     from training.trainer import ConflictNetTrainer

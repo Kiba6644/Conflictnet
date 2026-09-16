@@ -53,13 +53,17 @@ CONFLICT_EMOTIONS = {"ang", "fru"}  # used for binary conflict label in IEMOCAP
 # Shared utilities
 # ---------------------------------------------------------------------------
 
+_RESAMPLER_CACHE = {}
+
 def load_audio(path: str, target_sr: int = SAMPLE_RATE, max_len: float = MAX_AUDIO_LEN) -> torch.Tensor:
     """Load and resample audio file to target_sr, truncate to max_len seconds."""
     waveform, sr = torchaudio.load(path)
     if waveform.shape[0] > 1:
         waveform = waveform.mean(dim=0, keepdim=True)  # stereo → mono
     if sr != target_sr:
-        waveform = torchaudio.functional.resample(waveform, sr, target_sr)
+        if sr not in _RESAMPLER_CACHE:
+            _RESAMPLER_CACHE[sr] = torchaudio.transforms.Resample(sr, target_sr)
+        waveform = _RESAMPLER_CACHE[sr](waveform)
     max_samples = int(max_len * target_sr)
     waveform = waveform[:, :max_samples]
     return waveform.squeeze(0)  # (T,)
@@ -143,6 +147,11 @@ def compute_token_word_boundaries(
     return boundaries
 
 
+try:
+    from models.alignment.word_divergence import parse_textgrid
+except ImportError:
+    parse_textgrid = None
+
 def _load_word_timestamps_from_textgrid(
     textgrid_path: str,
 ) -> Optional[List[Tuple[float, float]]]:
@@ -155,10 +164,9 @@ def _load_word_timestamps_from_textgrid(
         List of ``(start_seconds, end_seconds)`` per word, or ``None``
         if the file is missing or unparseable.
     """
-    if not os.path.isfile(textgrid_path):
+    if not os.path.isfile(textgrid_path) or parse_textgrid is None:
         return None
     try:
-        from models.alignment.word_divergence import parse_textgrid
         words = parse_textgrid(textgrid_path)
         if not words:
             return None
@@ -166,6 +174,7 @@ def _load_word_timestamps_from_textgrid(
     except Exception:
         logger.warning(f"Failed to parse TextGrid: {textgrid_path}")
         return None
+
 
 
 def _textgrid_path_from_wav(
@@ -216,6 +225,17 @@ class IEMOCAPDataset(Dataset):
         self.textgrid_root = textgrid_root
         self.items = self._scan_items()
         logger.info(f"[IEMOCAP] {split}: {len(self.items)} utterances")
+        logger.info(f"[IEMOCAP] Pre-tokenizing {len(self.items)} utterances...")
+        for item in self.items:
+            ids, mask = tokenize(item["text"], self.tokenizer)
+            item["input_ids"] = ids
+            item["attention_mask"] = mask
+            if getattr(self, 'textgrid_root', None) is not None:
+                item["token_word_boundaries"] = compute_token_word_boundaries(item["text"], self.tokenizer)
+            else:
+                item["token_word_boundaries"] = None
+        self.tokenizer = None
+        logger.info(f"[IEMOCAP] Pre-tokenization complete")
 
     def _scan_items(self) -> List[Dict]:
         items = []
@@ -285,7 +305,8 @@ class IEMOCAPDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         item = self.items[idx]
         audio = load_audio(item["wav_path"])
-        input_ids, attention_mask = tokenize(item["text"], self.tokenizer)
+        input_ids = item["input_ids"]
+        attention_mask = item["attention_mask"]
 
         text = item["text"]
         word_timestamps: Optional[List[Tuple[float, float]]] = None
@@ -297,7 +318,7 @@ class IEMOCAPDataset(Dataset):
             if tg_path is not None:
                 word_timestamps = _load_word_timestamps_from_textgrid(tg_path)
                 if word_timestamps is not None and word_timestamps:
-                    token_word_boundaries = compute_token_word_boundaries(text, self.tokenizer)
+                    token_word_boundaries = item.get("token_word_boundaries")
 
         return {
             "audio": audio,
@@ -347,6 +368,17 @@ class MUStARDDataset(Dataset):
         self.textgrid_root = textgrid_root
         self.items = self._load_items(json_file, split, train_ratio)
         logger.info(f"[MUStARD++] {split}: {len(self.items)} utterances")
+        logger.info(f"[MUStARD++] Pre-tokenizing {len(self.items)} utterances...")
+        for item in self.items:
+            ids, mask = tokenize(item["text"], self.tokenizer)
+            item["input_ids"] = ids
+            item["attention_mask"] = mask
+            if getattr(self, 'textgrid_root', None) is not None:
+                item["token_word_boundaries"] = compute_token_word_boundaries(item["text"], self.tokenizer)
+            else:
+                item["token_word_boundaries"] = None
+        self.tokenizer = None
+        logger.info(f"[MUStARD++] Pre-tokenization complete")
 
     def _load_items(self, json_file: str, split: str, train_ratio: float) -> List[Dict]:
         json_path = self.root / json_file
@@ -403,7 +435,8 @@ class MUStARDDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         item = self.items[idx]
         audio = load_audio(item["wav_path"])
-        input_ids, attention_mask = tokenize(item["text"], self.tokenizer)
+        input_ids = item["input_ids"]
+        attention_mask = item["attention_mask"]
         sarcasm = item["sarcasm"]
         text = item["text"]
         word_timestamps: Optional[List[Tuple[float, float]]] = None
@@ -415,7 +448,7 @@ class MUStARDDataset(Dataset):
             if tg_path is not None:
                 word_timestamps = _load_word_timestamps_from_textgrid(tg_path)
                 if word_timestamps is not None and word_timestamps:
-                    token_word_boundaries = compute_token_word_boundaries(text, self.tokenizer)
+                    token_word_boundaries = item.get("token_word_boundaries")
         return {
             "audio": audio,
             "audio_np": audio.numpy(),
@@ -464,6 +497,17 @@ class CREMADDataset(Dataset):
         self.textgrid_root = textgrid_root
         self.items = self._scan_items(split, train_ratio)
         logger.info(f"[CREMA-D] {split}: {len(self.items)} utterances")
+        logger.info(f"[CREMA-D] Pre-tokenizing {len(self.items)} utterances...")
+        for item in self.items:
+            ids, mask = tokenize(item["text"], self.tokenizer)
+            item["input_ids"] = ids
+            item["attention_mask"] = mask
+            if getattr(self, 'textgrid_root', None) is not None:
+                item["token_word_boundaries"] = compute_token_word_boundaries(item["text"], self.tokenizer)
+            else:
+                item["token_word_boundaries"] = None
+        self.tokenizer = None
+        logger.info(f"[CREMA-D] Pre-tokenization complete")
 
     # CREMA-D sentences (12 fixed sentences used in recordings)
     _SENTENCES = {
@@ -536,7 +580,8 @@ class CREMADDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         item = self.items[idx]
         audio = load_audio(item["wav_path"])
-        input_ids, attention_mask = tokenize(item["text"], self.tokenizer)
+        input_ids = item["input_ids"]
+        attention_mask = item["attention_mask"]
         text = item["text"]
         word_timestamps: Optional[List[Tuple[float, float]]] = None
         token_word_boundaries: Optional[List[Tuple[int, int]]] = None
@@ -547,7 +592,7 @@ class CREMADDataset(Dataset):
             if tg_path is not None:
                 word_timestamps = _load_word_timestamps_from_textgrid(tg_path)
                 if word_timestamps is not None and word_timestamps:
-                    token_word_boundaries = compute_token_word_boundaries(text, self.tokenizer)
+                    token_word_boundaries = item.get("token_word_boundaries")
         return {
             "audio": audio,
             "audio_np": audio.numpy(),
@@ -595,6 +640,17 @@ class MELDDataset(Dataset):
         self.textgrid_root = textgrid_root
         self.items = self._load_items()
         logger.info(f"[MELD] {split}: {len(self.items)} utterances")
+        logger.info(f"[MELD] Pre-tokenizing {len(self.items)} utterances...")
+        for item in self.items:
+            ids, mask = tokenize(item["text"], self.tokenizer)
+            item["input_ids"] = ids
+            item["attention_mask"] = mask
+            if getattr(self, 'textgrid_root', None) is not None:
+                item["token_word_boundaries"] = compute_token_word_boundaries(item["text"], self.tokenizer)
+            else:
+                item["token_word_boundaries"] = None
+        self.tokenizer = None
+        logger.info(f"[MELD] Pre-tokenization complete")
 
     def _load_items(self) -> List[Dict]:
         split_map = {"train": "train", "val": "dev", "test": "test"}
@@ -667,7 +723,8 @@ class MELDDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         item = self.items[idx]
         audio = load_audio(item["wav_path"])
-        input_ids, attention_mask = tokenize(item["text"], self.tokenizer)
+        input_ids = item["input_ids"]
+        attention_mask = item["attention_mask"]
         text = item["text"]
         word_timestamps: Optional[List[Tuple[float, float]]] = None
         token_word_boundaries: Optional[List[Tuple[int, int]]] = None
@@ -678,7 +735,7 @@ class MELDDataset(Dataset):
             if tg_path is not None:
                 word_timestamps = _load_word_timestamps_from_textgrid(tg_path)
                 if word_timestamps is not None and word_timestamps:
-                    token_word_boundaries = compute_token_word_boundaries(text, self.tokenizer)
+                    token_word_boundaries = item.get("token_word_boundaries")
         return {
             "audio": audio,
             "audio_np": audio.numpy(),
@@ -730,6 +787,17 @@ class CMUMOSEIDataset(Dataset):
         self.textgrid_root = textgrid_root
         self.items = self._load_items()
         logger.info(f"[CMU-MOSEI] {split}: {len(self.items)} utterances")
+        logger.info(f"[CMU-MOSEI] Pre-tokenizing {len(self.items)} utterances...")
+        for item in self.items:
+            ids, mask = tokenize(item["text"], self.tokenizer)
+            item["input_ids"] = ids
+            item["attention_mask"] = mask
+            if getattr(self, 'textgrid_root', None) is not None:
+                item["token_word_boundaries"] = compute_token_word_boundaries(item["text"], self.tokenizer)
+            else:
+                item["token_word_boundaries"] = None
+        self.tokenizer = None
+        logger.info(f"[CMU-MOSEI] Pre-tokenization complete")
 
     def _load_items(self) -> List[Dict]:
         csv_path = self.root / "CMU_MOSEI" / "Labeled" / f"{self.split}.csv"
@@ -808,7 +876,8 @@ class CMUMOSEIDataset(Dataset):
         except Exception as e:
             logger.warning(f"[CMU-MOSEI] Failed to load audio at idx {idx}: {e}")
             audio = torch.zeros(int(SAMPLE_RATE * 1.0))
-        input_ids, attention_mask = tokenize(item["text"], self.tokenizer)
+        input_ids = item["input_ids"]
+        attention_mask = item["attention_mask"]
         text = item["text"]
         word_timestamps: Optional[List[Tuple[float, float]]] = None
         token_word_boundaries: Optional[List[Tuple[int, int]]] = None
@@ -819,7 +888,7 @@ class CMUMOSEIDataset(Dataset):
             if tg_path is not None:
                 word_timestamps = _load_word_timestamps_from_textgrid(tg_path)
                 if word_timestamps is not None and word_timestamps:
-                    token_word_boundaries = compute_token_word_boundaries(text, self.tokenizer)
+                    token_word_boundaries = item.get("token_word_boundaries")
         return {
             "audio": audio,
             "audio_np": audio.numpy(),
@@ -900,6 +969,17 @@ class CASEDataset(Dataset):
         self.textgrid_root = textgrid_root
         self.items = self._load_items(max_samples)
         logger.info(f"[CASE] {split}: {len(self.items)} utterances")
+        logger.info(f"[CASE] Pre-tokenizing {len(self.items)} utterances...")
+        for item in self.items:
+            ids, mask = tokenize(item["text"], self.tokenizer)
+            item["input_ids"] = ids
+            item["attention_mask"] = mask
+            if getattr(self, 'textgrid_root', None) is not None:
+                item["token_word_boundaries"] = compute_token_word_boundaries(item["text"], self.tokenizer)
+            else:
+                item["token_word_boundaries"] = None
+        self.tokenizer = None
+        logger.info(f"[CASE] Pre-tokenization complete")
 
     def _load_items(self, max_samples: Optional[int]) -> List[Dict]:
         meta_path = self.root / "metadata.jsonl"
@@ -961,7 +1041,8 @@ class CASEDataset(Dataset):
                 audio = torch.zeros(int(SAMPLE_RATE * 1.0))
         else:
             audio = torch.zeros(int(SAMPLE_RATE * 1.0))
-        input_ids, attention_mask = tokenize(item["text"], self.tokenizer)
+        input_ids = item["input_ids"]
+        attention_mask = item["attention_mask"]
         text = item["text"]
         word_timestamps: Optional[List[Tuple[float, float]]] = None
         token_word_boundaries: Optional[List[Tuple[int, int]]] = None
@@ -972,7 +1053,7 @@ class CASEDataset(Dataset):
             if tg_path is not None:
                 word_timestamps = _load_word_timestamps_from_textgrid(tg_path)
                 if word_timestamps is not None and word_timestamps:
-                    token_word_boundaries = compute_token_word_boundaries(text, self.tokenizer)
+                    token_word_boundaries = item.get("token_word_boundaries")
         return {
             "audio": audio,
             "audio_np": audio.numpy(),
@@ -1015,6 +1096,17 @@ class GoEmotionsDataset(Dataset):
         self.split = split
         self.items = self._load_items(max_samples)
         logger.info(f"[GoEmotions] {split}: {len(self.items)} utterances")
+        logger.info(f"[GoEmotions] Pre-tokenizing {len(self.items)} utterances...")
+        for item in self.items:
+            ids, mask = tokenize(item["text"], self.tokenizer)
+            item["input_ids"] = ids
+            item["attention_mask"] = mask
+            if getattr(self, 'textgrid_root', None) is not None:
+                item["token_word_boundaries"] = compute_token_word_boundaries(item["text"], self.tokenizer)
+            else:
+                item["token_word_boundaries"] = None
+        self.tokenizer = None
+        logger.info(f"[GoEmotions] Pre-tokenization complete")
 
     def _load_items(self, max_samples: Optional[int]) -> List[Dict]:
         try:
@@ -1042,7 +1134,8 @@ class GoEmotionsDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         item = self.items[idx]
         dummy_audio = torch.zeros(SAMPLE_RATE)  # 1 second of silence
-        input_ids, attention_mask = tokenize(item["text"], self.tokenizer)
+        input_ids = item["input_ids"]
+        attention_mask = item["attention_mask"]
         return {
             "audio": dummy_audio,
             "audio_np": np.zeros(SAMPLE_RATE, dtype=np.float32),

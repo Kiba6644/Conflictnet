@@ -146,7 +146,8 @@ class Emotion2VecEncoder(nn.Module):
             feat = self._extract_feature(r)
             feats_list.append(feat)
 
-        return torch.stack(feats_list, dim=0)
+        # FunASR runs on CPU internally; move result back to input device
+        return torch.stack(feats_list, dim=0).to(audio.device)
 
     def _verify_output_dim(self):
         """Log actual output dimension from the loaded model for verification."""
