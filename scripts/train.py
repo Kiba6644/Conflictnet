@@ -217,6 +217,10 @@ def main(args=None):
     # too late to protect a fresh cache from concurrent torchrun workers.
     from models.conflictnet import ConflictNet
 
+    if (getattr(args, "pt_dir", None) or os.environ.get("CONFLICTNET_PT_DIR")) and args.audio_encoder != "precomputed":
+        logger.info("Using precomputed audio embeddings: setting audio_encoder to 'precomputed' to save ~2.5GB VRAM.")
+        args.audio_encoder = "precomputed"
+
     def _build_model():
         return ConflictNet(
             audio_encoder_name=args.audio_encoder,

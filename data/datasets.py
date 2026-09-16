@@ -1585,14 +1585,20 @@ def _collate_core(
         word_timestamps = None
         token_word_boundaries = None
 
+    raw_ids = torch.stack([b["input_ids"] for b in batch])
+    raw_mask = torch.stack([b["attention_mask"] for b in batch])
+    max_batch_seq_len = max(int(raw_mask.sum(dim=1).max().item()), 16)
+    input_ids = raw_ids[:, :max_batch_seq_len]
+    attention_mask = raw_mask[:, :max_batch_seq_len]
+
     return {
         "audio": audio_padded,
         "speaker_embed": speaker_padded,
         "audio_frames": audio_frames_padded,
         "is_precomputed": is_precomputed,
         "audio_attention_mask": audio_attention_mask,
-        "input_ids": torch.stack([b["input_ids"] for b in batch]),
-        "attention_mask": torch.stack([b["attention_mask"] for b in batch]),
+        "input_ids": input_ids,
+        "attention_mask": attention_mask,
         "prosody_z": prosody_z,
         "conflict_binary": torch.stack([b["conflict_binary"] for b in batch]).float(),
         "conflict_type_labels": torch.stack([b["conflict_type_labels"] for b in batch]),

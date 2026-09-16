@@ -508,6 +508,17 @@ class DualAudioEncoder(nn.Module):
         return self.proj(pool)
 
 
+class PrecomputedAudioEncoder(nn.Module):
+    """Zero-weight placeholder when audio embeddings are precomputed."""
+    def __init__(self, output_dim: int = 1024, **kwargs):
+        super().__init__()
+        self.output_dim = output_dim
+        self._backend = "precomputed"
+
+    def forward(self, x, **kwargs):
+        return x
+
+
 def build_audio_encoder(name: str = "emotion2vec", **kwargs) -> nn.Module:
     encoders = {
         "wav2vec2": Wav2Vec2Encoder,
@@ -516,6 +527,7 @@ def build_audio_encoder(name: str = "emotion2vec", **kwargs) -> nn.Module:
         "emotion2vec": Emotion2VecEncoder,
         "whisper": WhisperEncoder,
         "dual": DualAudioEncoder,
+        "precomputed": PrecomputedAudioEncoder,
     }
     if name not in encoders:
         raise ValueError(f"Unknown audio encoder: {name}. Choose from {list(encoders.keys())}")

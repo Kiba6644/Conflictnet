@@ -77,6 +77,27 @@ class DeBERTaEncoder(nn.Module):
             self._backend = "pretrained"
             return
         except Exception as e:
+            # Handle PyTorch < 2.6 security restriction by converting local .bin to .safetensors
+            if os.path.isdir(model_name) and os.path.exists(os.path.join(model_name, "pytorch_model.bin")) and not os.path.exists(os.path.join(model_name, "model.safetensors")):
+                try:
+                    import torch
+                    from safetensors.torch import save_file
+                    logger.info(f"Converting {model_name}/pytorch_model.bin to safetensors format...")
+                    bin_file = os.path.join(model_name, "pytorch_model.bin")
+                    safe_file = os.path.join(model_name, "model.safetensors")
+                    sd = torch.load(bin_file, map_location="cpu", weights_only=False)
+                    save_file(sd, safe_file)
+                    self.encoder = AutoModel.from_pretrained(model_name)
+                    self.output_dim = self.encoder.config.hidden_size
+                    if gradient_checkpointing and hasattr(self.encoder, "gradient_checkpointing_enable"):
+                        self.encoder.gradient_checkpointing_enable()
+                    if use_lora:
+                        self._apply_lora(lora_r, lora_alpha)
+                    self._backend = "pretrained"
+                    return
+                except Exception as conv_e:
+                    logger.warning(f"Failed to auto-convert {model_name} to safetensors: {conv_e}")
+
             if requested_backend == "pretrained":
                 raise RuntimeError(
                     "Rank 0 selected the pretrained DeBERTa backend, but this rank "
