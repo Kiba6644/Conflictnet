@@ -34,7 +34,8 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
 import torch
-
+import torch.multiprocessing
+torch.multiprocessing.set_sharing_strategy('file_system')
 # Disable Memory-Efficient and Flash Attention backends globally.
 # On Kaggle's dual-T4 (Turing architecture) GPUs, PyTorch's scaled_dot_product_attention 
 # (which nn.MultiheadAttention uses) can enter infinite loops or cause Segmentation Faults 
