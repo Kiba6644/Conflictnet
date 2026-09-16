@@ -466,8 +466,14 @@ def main():
     train_set = ConcatDataset(train_datasets)
     val_set = ConcatDataset(val_datasets)
 
-    # Try 2 workers: fast enough to speed up I/O, but small enough to hopefully fit in Docker's 64MB SHM limit
-    optimal_workers = 2
+    # Use 8 workers to max out CPU I/O, but use 'spawn' context to avoid Docker's strict fork semaphore limits
+    optimal_workers = 8
+    
+    import torch.multiprocessing as mp
+    try:
+        mp.set_start_method('spawn', force=True)
+    except RuntimeError:
+        pass
     
     from torch.utils.data.distributed import DistributedSampler
     train_sampler = DistributedSampler(train_set) if local_rank != -1 else None
@@ -511,6 +517,7 @@ def main():
         collate_fn=train_collate,
         pin_memory=False,
         persistent_workers=False,
+        multiprocessing_context='spawn' if optimal_workers > 0 else None,
     )
     
     val_loader = DataLoader(
@@ -520,6 +527,7 @@ def main():
         collate_fn=val_collate,
         pin_memory=False,
         persistent_workers=False,
+        multiprocessing_context='spawn' if optimal_workers > 0 else None,
     )
 
     logger.info(f"Train samples: {len(train_set)} | Val samples: {len(val_set)}")
