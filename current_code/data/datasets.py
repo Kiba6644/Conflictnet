@@ -651,6 +651,11 @@ class MELDDataset(Dataset):
                 item["token_word_boundaries"] = None
         self.tokenizer = None
         logger.info(f"[MELD] Pre-tokenization complete")
+        # Preload all audio into RAM — eliminates per-step disk I/O
+        # MELD clips avg ~2-3s each; ~13k utterances ≈ 2GB total — feasible on GPU pods
+        logger.info(f"[MELD] Preloading audio for {len(self.items)} utterances into RAM...")
+        self.audio_cache = [load_audio(item["wav_path"]) for item in self.items]
+        logger.info(f"[MELD] Audio preload complete")
 
     def _load_items(self) -> List[Dict]:
         split_map = {"train": "train", "val": "dev", "test": "test"}
@@ -722,7 +727,7 @@ class MELDDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         item = self.items[idx]
-        audio = load_audio(item["wav_path"])
+        audio = self.audio_cache[idx]
         input_ids = item["input_ids"]
         attention_mask = item["attention_mask"]
         text = item["text"]
