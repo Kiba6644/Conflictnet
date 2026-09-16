@@ -91,12 +91,12 @@ class CrossModalAttention(nn.Module):
         dtype = audio_embed.dtype
 
         # ModalDrop (during training)
-        if self.training:
-            if random.random() < self.modal_drop_p:
+        if self.training and self.modal_drop_p > 0:
+            if torch.rand((), device=device) < self.modal_drop_p:
                 audio_embed = torch.zeros_like(audio_embed)
                 if audio_seq is not None:
                     audio_seq = torch.zeros_like(audio_seq)
-            if random.random() < self.modal_drop_p:
+            if torch.rand((), device=device) < self.modal_drop_p:
                 text_embed = torch.zeros_like(text_embed)
                 if text_seq is not None:
                     text_seq = torch.zeros_like(text_seq)

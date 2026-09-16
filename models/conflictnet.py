@@ -186,7 +186,7 @@ class MultiTaskLoss(nn.Module):
             # log_vars[2] frozen at its init value of 5.0 throughout training.
             loss_i = loss.to(self.log_vars.device)
             total = total + precision * loss_i + 0.5 * log_var_clamped
-            weights[f"sigma_task_{i}"] = torch.exp(self.log_vars[i] * 0.5).item()
+            weights[f"sigma_task_{i}"] = torch.exp(self.log_vars[i] * 0.5).detach()
         return total, weights
 
 
@@ -699,13 +699,13 @@ class ConflictNet(nn.Module):
 
             loss, sigma_weights = self.multi_task_loss(losses)
             loss_breakdown = {
-                "contrastive": losses[0].detach().item(),
-                "type_bce": losses[1].detach().item(),
-                "severity_mse": losses[2].detach().item(),
+                "contrastive": losses[0].detach(),
+                "type_bce": losses[1].detach(),
+                "severity_mse": losses[2].detach(),
                 **sigma_weights,
             }
             if self.swap_objective is not None:
-                loss_breakdown["swap"] = losses[3].detach().item()
+                loss_breakdown["swap"] = losses[3].detach()
 
             # 6e. Router entropy regularisation (penalises hard 0/1 collapse)
             if self.modality_router is not None and router_alpha is not None:
@@ -713,7 +713,7 @@ class ConflictNet(nn.Module):
                 # Subtract to MAXIMIZE entropy: prevents alpha from collapsing to 0 or 1
                 # which would zero out one entire modality (audio or text).
                 loss = loss - self.router_entropy_reg * router_ent_loss
-                loss_breakdown["router_entropy"] = router_ent_loss.detach().item()
+                loss_breakdown["router_entropy"] = router_ent_loss.detach()
 
         return ConflictNetOutput(
             logits_type=logits_type,
