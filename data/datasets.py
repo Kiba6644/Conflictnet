@@ -71,11 +71,13 @@ def load_audio(path: str, target_sr: int = SAMPLE_RATE, max_len: float = MAX_AUD
     # Only use precomputed .pt features if CONFLICTNET_PT_DIR is explicitly provided
     pt_dir = os.environ.get("CONFLICTNET_PT_DIR", "")
     if pt_dir:
-        pt_path = Path(path).with_suffix(".pt")
-        if not pt_path.exists():
-            pt_path = Path(pt_dir) / f"{Path(path).stem}.pt"
-
-        if pt_path.exists():
+        candidates = [
+            Path(path).with_suffix(".pt"),
+            Path(pt_dir) / Path(path).parent.name / f"{Path(path).stem}.pt",
+            Path(pt_dir) / f"{Path(path).stem}.pt",
+        ]
+        pt_path = next((p for p in candidates if p.exists()), None)
+        if pt_path is not None:
             # Precomputed embedding dict, just load and return
             return torch.load(pt_path, map_location="cpu", weights_only=True)
 
