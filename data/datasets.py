@@ -1513,8 +1513,9 @@ def _collate_core(
     is_precomputed = isinstance(batch[0]["audio"], dict)
     
     if is_precomputed:
+        default_audio_dim = next((b["audio"]["audio"].shape[-1] for b in batch if isinstance(b["audio"], dict)), 1024)
         audio_padded = torch.stack([
-            b["audio"]["audio"] if isinstance(b["audio"], dict) else torch.zeros(256) 
+            b["audio"]["audio"] if isinstance(b["audio"], dict) else torch.zeros(default_audio_dim) 
             for b in batch
         ])
         speaker_padded = torch.stack([

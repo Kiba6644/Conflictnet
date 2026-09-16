@@ -111,14 +111,22 @@ def extract_features(data_root: str, output_dir: str, batch_size: int = 16, audi
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_root", type=str, required=True, help="Path to dataset root (e.g. /kaggle/input/.../MELD.Raw)")
-    parser.add_argument("--output_dir", type=str, default="/kaggle/working/features", help="Output directory for pt files")
-    parser.add_argument("--batch_size", type=int, default=16)
-    parser.add_argument("--audio_encoder", type=str, default="emotion2vec", help="Audio encoder to use")
-    parser.add_argument("--audio_encoder_path", type=str, default=None, help="Local path for Emotion2Vec")
+    parser.add_argument("--data_root", type=str, default=None, help="Path to dataset root")
+    parser.add_argument("--meld_root", type=str, default=None, help="Alias for --data_root")
+    parser.add_argument("--output_dir", type=str, default="/workspace/features", help="Output directory for pt files")
+    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--audio_encoder", type=str, default="wavlm_weighted", help="Audio encoder to use (wavlm_weighted, emotion2vec, wavlm, etc.)")
+    parser.add_argument("--audio_encoder_path", type=str, default=None, help="Local path for audio encoder")
     args = parser.parse_args()
     
+    root_path = args.data_root or args.meld_root
+    if not root_path:
+        parser.error("Must provide either --data_root or --meld_root")
+
+    # Clear CONFLICTNET_PT_DIR so load_audio extracts from raw audio
+    os.environ["CONFLICTNET_PT_DIR"] = ""
     if args.audio_encoder_path:
         os.environ["CONFLICTNET_EMOTION2VEC_PATH"] = args.audio_encoder_path
+        os.environ["CONFLICTNET_WAVLM_PATH"] = args.audio_encoder_path
     
-    extract_features(args.data_root, args.output_dir, args.batch_size, args.audio_encoder)
+    extract_features(root_path, args.output_dir, args.batch_size, args.audio_encoder)
