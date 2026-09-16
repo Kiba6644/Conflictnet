@@ -64,6 +64,8 @@ CONFLICT_EMOTIONS = {"ang", "fru"}  # used for binary conflict label in IEMOCAP
 # Shared utilities
 # ---------------------------------------------------------------------------
 
+_RESAMPLER_CACHE: Dict[Tuple[int, int], Any] = {}
+
 def load_audio(path: str, target_sr: int = SAMPLE_RATE, max_len: float = MAX_AUDIO_LEN) -> torch.Tensor | Dict[str, torch.Tensor]:
     """Load and resample audio file to target_sr, or load precomputed .pt dict if exists."""
     # Only use precomputed .pt features if CONFLICTNET_PT_DIR is explicitly provided
@@ -115,7 +117,9 @@ def load_audio(path: str, target_sr: int = SAMPLE_RATE, max_len: float = MAX_AUD
     if waveform.shape[0] > 1:
         waveform = waveform.mean(dim=0, keepdim=True)  # stereo → mono
     if sr != target_sr:
-        waveform = torchaudio.functional.resample(waveform, sr, target_sr)
+        if (sr, target_sr) not in _RESAMPLER_CACHE:
+            _RESAMPLER_CACHE[(sr, target_sr)] = torchaudio.transforms.Resample(sr, target_sr)
+        waveform = _RESAMPLER_CACHE[(sr, target_sr)](waveform)
     
     # Pad extremely short clips (e.g. <0.2s) to prevent WavLM masking crashes
     # WavLM requires sequence_length > mask_length (10 frames = 3200 samples)
@@ -769,6 +773,17 @@ class MELDDataset(Dataset):
         self.max_samples = max_samples
         self.items = self._load_items()
         logger.info(f"[MELD] {split}: {len(self.items)} utterances")
+        logger.info(f"[MELD] Pre-tokenizing {len(self.items)} utterances...")
+        for item in self.items:
+            ids, mask = tokenize(item["text"], self.tokenizer)
+            item["input_ids"] = ids
+            item["attention_mask"] = mask
+            if getattr(self, "textgrid_root", None) is not None:
+                item["token_word_boundaries"] = compute_token_word_boundaries(item["text"], self.tokenizer)
+            else:
+                item["token_word_boundaries"] = None
+        self.tokenizer = None
+        logger.info(f"[MELD] Pre-tokenization complete")
 
     def _load_items(self) -> List[Dict]:
         split_map = {"train": "train", "val": "dev", "test": "test"}
@@ -1039,7 +1054,8 @@ class MELDDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         item = self.items[idx]
         audio = load_audio(item["wav_path"])
-        input_ids, attention_mask = tokenize(item["text"], self.tokenizer)
+        input_ids = item["input_ids"]
+        attention_mask = item["attention_mask"]
         text = item["text"]
         word_timestamps: Optional[List[Tuple[float, float]]] = None
         token_word_boundaries: Optional[List[Tuple[int, int]]] = None
@@ -1050,7 +1066,7 @@ class MELDDataset(Dataset):
             if tg_path is not None:
                 word_timestamps = _load_word_timestamps_from_textgrid(tg_path)
                 if word_timestamps is not None and word_timestamps:
-                    token_word_boundaries = compute_token_word_boundaries(text, self.tokenizer)
+                    token_word_boundaries = item.get("token_word_boundaries")
         return {
             "audio": audio,
             "audio_np": audio.numpy() if isinstance(audio, torch.Tensor) else None,

@@ -464,18 +464,20 @@ class ConflictNetTrainer:
             else:
                 logger.debug("Skipping optimizer step, accumulating gradients")
 
-            total_loss += loss.item() * grad_accum_steps
+            total_loss += loss.detach() * grad_accum_steps
             n_batches += 1
 
             if self.global_step % 10 == 0 and self.global_step > 0:
                 metrics = {
-                    "loss": loss.item() * grad_accum_steps,
+                    "loss": loss.detach().item() * grad_accum_steps,
                     "lr": self.scheduler.get_last_lr()[0],
                 }
                 if output.loss_breakdown:
                     for k, v in output.loss_breakdown.items():
-                        if isinstance(v, float) and k in ("bce_type", "bce_binary", "swap_loss", "severity"):
-                            metrics[k] = v
+                        if isinstance(v, (float, int)) and k in ("bce_type", "bce_binary", "swap_loss", "severity"):
+                            metrics[k] = float(v)
+                        elif isinstance(v, torch.Tensor) and k in ("bce_type", "bce_binary", "swap_loss", "severity"):
+                            metrics[k] = v.item()
                 self._log(metrics, self.global_step)
 
         # Handle remaining gradients when epoch ends mid-accumulation
@@ -496,6 +498,8 @@ class ConflictNetTrainer:
             self.optimizer.zero_grad()
             self.global_step += 1
 
+        if isinstance(total_loss, torch.Tensor):
+            total_loss = total_loss.item()
         return {"loss": total_loss / max(n_batches, 1)}
 
     @torch.no_grad()

@@ -152,6 +152,8 @@ def parse_args(argv=None):
                    help="Entropy regularization for modality router (prevents collapse)")
     p.add_argument("--augment_p", type=float, default=0.5,
                    help="Probability of applying augmentation per sample (0=off, 1=always)")
+    p.add_argument("--num_workers", type=int, default=0,
+                   help="DataLoader worker processes. Default 0 (single process). Set >0 if running in an environment with sufficient shared memory.")
     return p.parse_args()
 
 
@@ -472,18 +474,11 @@ def main():
     train_set = ConcatDataset(train_datasets)
     val_set = ConcatDataset(val_datasets)
 
-    # Docker SHM limit is so small it cannot even hold a single 24-batch queue.
-    # We must use 0 workers. It is the only way to bypass the OS limit.
-    optimal_workers = 0
-    
-    from torch.utils.data.distributed import DistributedSampler
-    train_sampler = DistributedSampler(train_set) if local_rank != -1 else None
-    # Validation is evaluated in full by rank 0 (and the metrics are broadcast
-    import torch.distributed as dist
     from data.samplers import DialogueDistributedBatchSampler
 
     # Set up training batch sampler
     if is_ddp_run:
+        import torch.distributed as dist
         train_batch_sampler = DialogueDistributedBatchSampler(
             train_set, 
             batch_size=args.batch_size or 16, 
@@ -509,26 +504,29 @@ def main():
         shuffle=False
     )
 
+    optimal_workers = args.num_workers
+    _use_persistent = optimal_workers > 0
+    _prefetch = 2 if optimal_workers > 0 else None
+    _pin_memory = torch.cuda.is_available()
+
     train_loader = DataLoader(
         train_set,
         batch_sampler=train_batch_sampler,
         num_workers=optimal_workers,
         collate_fn=train_collate,
-        pin_memory=False,
-        persistent_workers=False,
-        prefetch_factor=1 if optimal_workers > 0 else None,
-        multiprocessing_context='spawn' if optimal_workers > 0 else None,
+        pin_memory=_pin_memory,
+        persistent_workers=_use_persistent,
+        prefetch_factor=_prefetch,
     )
     
     val_loader = DataLoader(
         val_set,
         batch_sampler=val_batch_sampler,
-        num_workers=optimal_workers,
+        num_workers=min(optimal_workers, 2) if optimal_workers > 0 else 0,
         collate_fn=val_collate,
-        pin_memory=False,
-        persistent_workers=False,
-        prefetch_factor=1 if optimal_workers > 0 else None,
-        multiprocessing_context='spawn' if optimal_workers > 0 else None,
+        pin_memory=_pin_memory,
+        persistent_workers=_use_persistent,
+        prefetch_factor=_prefetch,
     )
 
     logger.info(f"Train samples: {len(train_set)} | Val samples: {len(val_set)}")
