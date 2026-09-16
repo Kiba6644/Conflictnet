@@ -23,16 +23,8 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 # Prevent HuggingFace tokenizer from spawning extra threads in DataLoader workers
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-# --- FIX FOR DOCKER /dev/shm EXHAUSTION ---
-# PyTorch's default 'file_descriptor' strategy allocates shared tensors via
-# shm_open(), which maps to /dev/shm. Most Docker/pod environments cap /dev/shm
-# at 64MB — far too small for multi-worker DataLoaders.
-# 'file_system' uses regular files in TMPDIR instead, bypassing the limit entirely.
-# We point TMPDIR to /workspace (100GB) if available, otherwise /tmp.
-# Must be set before DataLoader workers are spawned.
-_shm_dir = "/workspace/torch_shm" if os.path.isdir("/workspace") else os.path.expanduser("~/tmp")
-os.makedirs(_shm_dir, exist_ok=True)
-os.environ["TMPDIR"] = _shm_dir
+# Use file_system sharing strategy to avoid /dev/shm exhaustion.
+# Default num_workers=0 means no shared memory is needed at all.
 import torch
 import torch.multiprocessing
 torch.multiprocessing.set_sharing_strategy("file_system")
@@ -84,7 +76,7 @@ def parse_args(argv=None):
                    help="Disable automatic mixed precision (fp16) training")
     p.add_argument("--compile", action="store_true",
                    help="Use torch.compile() for up to 2x speedup (requires PyTorch 2.0+)")
-    p.add_argument("--num_workers", type=int, default=4,
+    p.add_argument("--num_workers", type=int, default=0,
                    help="DataLoader worker processes. Use 0 to disable multiprocessing "
                         "(fixes /dev/shm exhaustion in containers with small shm size).")
     return p.parse_args()
