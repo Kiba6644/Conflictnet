@@ -785,11 +785,12 @@ class MELDDataset(Dataset):
             else:
                 item["token_word_boundaries"] = None
         self.tokenizer = None
-        logger.info(f"[MELD] Pre-tokenization complete")
-        # Preload all audio into RAM — eliminates per-step disk I/O
-        # MELD clips avg ~2-3s each; ~13k utterances ≈ 2GB total — feasible on GPU pods
+        # Preload all audio / precomputed features into RAM in parallel using multi-threading
         logger.info(f"[MELD] Preloading audio for {len(self.items)} utterances into RAM...")
-        self.audio_cache = [load_audio(item["wav_path"]) for item in self.items]
+        from concurrent.futures import ThreadPoolExecutor
+        _n_workers = min(16, (os.cpu_count() or 4) * 2)
+        with ThreadPoolExecutor(max_workers=_n_workers) as executor:
+            self.audio_cache = list(executor.map(lambda item: load_audio(item["wav_path"]), self.items))
         logger.info(f"[MELD] Audio preload complete")
 
     def _load_items(self) -> List[Dict]:

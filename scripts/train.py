@@ -147,6 +147,8 @@ def parse_args(argv=None):
                    help="Label smoothing epsilon for conflict type BCE loss (0 = disabled)")
     p.add_argument("--use_adaptive_router", action="store_true",
                    help="Enable learned modality router alpha gate (text vs audio weighting)")
+    p.add_argument("--router_entropy_reg", type=float, default=0.01,
+                   help="Entropy regularization for modality router (prevents collapse)")
     p.add_argument("--augment_p", type=float, default=0.5,
                    help="Probability of applying augmentation per sample (0=off, 1=always)")
     p.add_argument("--num_workers", type=int, default=0,
