@@ -32,18 +32,20 @@ class LearnedPositionalEncoding(nn.Module):
 
 
 class SpeakerRoleEmbedding(nn.Module):
-    """Optional type embedding: speaker A (0) vs speaker B (1)."""
+    """Optional type embedding: speaker roles for multi-party conversation (up to num_speakers)."""
 
-    def __init__(self, embed_dim: int):
+    def __init__(self, embed_dim: int, num_speakers: int = 16):
         super().__init__()
-        self.embedding = nn.Embedding(2, embed_dim)  # 0=SPK_A, 1=SPK_B
+        self.num_speakers = num_speakers
+        self.embedding = nn.Embedding(num_speakers, embed_dim)
 
     def forward(self, x: torch.Tensor, speaker_roles: torch.Tensor) -> torch.Tensor:
         """
         x: (B, T, D)
-        speaker_roles: (B, T) — 0 or 1 indicating which speaker each turn belongs to
+        speaker_roles: (B, T) — integer in [0, num_speakers - 1] indicating which speaker each turn belongs to
         """
-        return x + self.embedding(speaker_roles)
+        clamped_roles = speaker_roles.clamp(0, self.num_speakers - 1)
+        return x + self.embedding(clamped_roles)
 
 
 def drop_path(x, drop_prob: float = 0., training: bool = False, scale_by_keep: bool = True):
@@ -108,6 +110,7 @@ class TransformerTemporalContext(nn.Module):
         max_turns: int = 16,
         use_speaker_roles: bool = True,
         causal: bool = True,
+        num_speakers: int = 16,
     ):
         super().__init__()
         self.embed_dim = embed_dim
@@ -117,7 +120,7 @@ class TransformerTemporalContext(nn.Module):
         ff_dim = ff_dim or embed_dim * 4
         
         self.pos_encoding = LearnedPositionalEncoding(max_turns, embed_dim)
-        self.speaker_role_emb = SpeakerRoleEmbedding(embed_dim) if use_speaker_roles else None
+        self.speaker_role_emb = SpeakerRoleEmbedding(embed_dim, num_speakers=num_speakers) if use_speaker_roles else None
 
         encoder_layer = DropPathTransformerEncoderLayer(
             d_model=embed_dim,

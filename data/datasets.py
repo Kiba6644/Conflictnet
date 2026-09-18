@@ -1565,6 +1565,37 @@ def _collate_core(
     speaker_ids = [b["speaker_id"] for b in batch]
     genders = [b.get("gender") for b in batch]
 
+    # Speaker role mapping for multi-party conversational temporal context
+    MELD_CHARACTER_ROLES = {
+        "chandler": 0,
+        "joey": 1,
+        "monica": 2,
+        "phoebe": 3,
+        "rachel": 4,
+        "ross": 5,
+    }
+
+    def _get_speaker_role(spk_id: Optional[str], gen: Optional[str] = None) -> int:
+        if not spk_id or not isinstance(spk_id, str):
+            return 0
+        s_low = spk_id.lower()
+        for name, idx in MELD_CHARACTER_ROLES.items():
+            if name in s_low:
+                return idx
+        if gen is not None:
+            g = str(gen).strip().upper()
+            if g == "F":
+                return 0
+            elif g == "M":
+                return 1
+        import zlib
+        return zlib.crc32(spk_id.encode("utf-8")) % 16
+
+    speaker_roles = torch.tensor(
+        [_get_speaker_role(b.get("speaker_id"), b.get("gender")) for b in batch],
+        dtype=torch.long,
+    )
+
     # Conversation context for temporal / cross-attn modules
     conversation_ids = [
         b.get("conversation_id", b.get("utterance_id", f"single_{i}"))
@@ -1606,6 +1637,7 @@ def _collate_core(
         "conversation_ids": conversation_ids,
         "turn_indices": turn_indices,
         "speaker_ids": speaker_ids,
+        "speaker_roles": speaker_roles,
         "genders": genders,
         "utterance_ids": [b.get("utterance_id", "") for b in batch],
         "word_timestamps": word_timestamps,

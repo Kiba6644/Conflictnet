@@ -181,7 +181,20 @@ class ConflictClassifier(nn.Module):
                 if name == "mustard":
                     logits_type[i, 0] = sarcasm_logits[i]
 
-        probs_type = torch.sigmoid(logits_type)  # (B, n_types)
+            single_label_mask = torch.tensor(
+                [n in ("meld", "cremad", "iemocap") for n in dataset_names],
+                device=logits_type.device,
+                dtype=torch.bool,
+            )
+            if single_label_mask.all():
+                probs_type = torch.softmax(logits_type, dim=-1)
+            elif not single_label_mask.any():
+                probs_type = torch.sigmoid(logits_type)
+            else:
+                probs_type = torch.sigmoid(logits_type)
+                probs_type[single_label_mask] = torch.softmax(logits_type[single_label_mask], dim=-1)
+        else:
+            probs_type = torch.sigmoid(logits_type)
 
         severity = None
         if self.severity_proj is not None:

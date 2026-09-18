@@ -51,6 +51,9 @@ class ExperimentConfig:
     use_word_divergence: bool = True
     use_adaptive_router: bool = False
     router_entropy_reg: float = 0.01
+    modality_dropout: float = 0.15
+    use_cross_entropy: bool = True
+    use_class_weights: bool = True
 
     # ── Data configuration ──────────────────────────────────────────────
     temporal_max_turns: int = 8
@@ -93,6 +96,7 @@ class ExperimentConfig:
             "no_baseline_subtract": "use_baseline_subtract",
             "no_word_divergence": "use_word_divergence",
             "no_amp": "amp",
+            "no_class_weights": "use_class_weights",
             "use_adaptive_router": "use_adaptive_router",  # direct passthrough (no negation)
         }
 
@@ -120,6 +124,7 @@ class ExperimentConfig:
             "use_baseline_subtract": "no_baseline_subtract",
             "use_word_divergence": "no_word_divergence",
             "amp": "no_amp",
+            "use_class_weights": "no_class_weights",
         }
 
         for field_name in (f.name for f in dataclasses.fields(self)):

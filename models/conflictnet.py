@@ -236,6 +236,9 @@ class ConflictNet(nn.Module):
         unfreeze_audio_layers: int = 0,
         use_adaptive_router: bool = False,
         router_entropy_reg: float = 0.01,
+        modality_dropout_prob: float = 0.15,
+        use_cross_entropy: bool = True,
+        use_class_weights: bool = True,
     ):
         super().__init__()
         self.embed_dim = embed_dim
@@ -247,6 +250,9 @@ class ConflictNet(nn.Module):
         self.use_speaker_adaptive_threshold = use_speaker_adaptive_threshold
         self.use_baseline_subtract = use_baseline_subtract
         self.label_smoothing = label_smoothing
+        self.modality_dropout_prob = modality_dropout_prob
+        self.use_cross_entropy = use_cross_entropy
+        self.use_class_weights = use_class_weights
 
         # Balanced pos_weight for MELD/CREMA-D classes: [anger, disgust, fear, joy, neutral, sadness]
         # MELD frequencies: Anger 11%, Disgust 3%, Fear 3%, Joy 17%, Neutral 47%, Sadness 7%
@@ -265,6 +271,15 @@ class ConflictNet(nn.Module):
             pos_w = pos_w_padded
             
         self.register_buffer("pos_weight", pos_w)
+
+        # Multi-class cross-entropy class weights for [anger, disgust, fear, joy, neutral, sadness]
+        # Inverse-frequency based for MELD: Anger ~11%, Disgust ~3%, Fear ~3%, Joy ~17%, Neutral ~59%, Sadness ~7%
+        ce_w = torch.tensor([1.5, 3.5, 3.5, 1.0, 0.4, 2.2])
+        if n_conflict_types != 6:
+            ce_w_padded = torch.full((n_conflict_types,), 1.0)
+            ce_w_padded[:min(6, n_conflict_types)] = ce_w[:min(6, n_conflict_types)]
+            ce_w = ce_w_padded
+        self.register_buffer("class_weights", ce_w)
 
         # 1. Encoders
         self.audio_encoder = build_audio_encoder(
@@ -484,6 +499,16 @@ class ConflictNet(nn.Module):
             audio_embed = (1 - alpha) * audio_embed
             text_embed = alpha * text_embed
 
+        # Modality Dropout: regularize audio/text representations to prevent text dominance
+        if self.training and self.modality_dropout_prob > 0.0:
+            B = audio_embed.size(0)
+            r = torch.rand(B, 1, device=audio_embed.device)
+            p = self.modality_dropout_prob
+            audio_mask = (r >= p).float()
+            text_mask = ((r < p) | (r >= 2 * p)).float()
+            audio_embed = audio_embed * audio_mask
+            text_embed = text_embed * text_mask
+
         if self.use_speaker_norm:
             combined = torch.cat([audio_embed, text_embed, speaker_feat], dim=-1)
         else:
@@ -516,7 +541,8 @@ class ConflictNet(nn.Module):
         # Dialogue context (optional)
         context_embeds: Optional[torch.Tensor] = None,    # (B, T_turns, embed_dim)
         context_padding: Optional[torch.Tensor] = None,   # (B, T_turns) bool
-        speaker_roles: Optional[torch.Tensor] = None,     # (B, T_turns) int
+        speaker_roles: Optional[torch.Tensor] = None,     # (B,) or (B, T_turns) int
+        context_speaker_roles: Optional[torch.Tensor] = None,  # (B, T_turns) int
         # Speaker normalization — pass pre-computed tensor from collate_fn
         prosody_z: Optional[torch.Tensor] = None,         # (B, 3) on device
         # Word-level divergence inputs (optional, requires MFA alignment)
@@ -605,8 +631,35 @@ class ConflictNet(nn.Module):
                 turn_seq = current_turn
                 pad_mask = None
 
+            # Multi-party speaker role alignment across dialogue sequence
+            full_speaker_roles = None
+            if speaker_roles is not None:
+                if speaker_roles.dim() == 1:
+                    curr_spk = speaker_roles.unsqueeze(1)
+                elif speaker_roles.dim() == 2 and speaker_roles.size(1) == 1:
+                    curr_spk = speaker_roles
+                elif speaker_roles.dim() == 2 and speaker_roles.size(1) == turn_seq.size(1):
+                    full_speaker_roles = speaker_roles
+                    curr_spk = None
+                else:
+                    curr_spk = speaker_roles
+
+                if full_speaker_roles is None and curr_spk is not None:
+                    if context_embeds is not None:
+                        if context_speaker_roles is not None:
+                            full_speaker_roles = torch.cat(
+                                [context_speaker_roles.to(fused_embed.device), curr_spk.to(fused_embed.device)], dim=1
+                            )
+                        else:
+                            ctx_spk = torch.zeros(
+                                curr_spk.size(0), context_embeds.size(1), dtype=curr_spk.dtype, device=fused_embed.device
+                            )
+                            full_speaker_roles = torch.cat([ctx_spk, curr_spk.to(fused_embed.device)], dim=1)
+                    else:
+                        full_speaker_roles = curr_spk
+
             per_turn_ctx, context_pooled = self.temporal(
-                turn_seq, padding_mask=pad_mask, speaker_roles=speaker_roles
+                turn_seq, padding_mask=pad_mask, speaker_roles=full_speaker_roles
             )
             current_ctx = per_turn_ctx[:, -1, :]  # last position
         else:
@@ -655,28 +708,62 @@ class ConflictNet(nn.Module):
             )
             losses.append(cl)
 
-            # 6b. Multi-label BCE loss for conflict types (with label smoothing)
-            # BUG FIX: old code gated the entire loss on dataset_names == "mustard",
-            # giving MELD/CREMA-D/IEMOCAP samples a ZERO gradient on their emotion
-            # labels. Now all datasets use the same focal BCE path uniformly.
+            # 6b. Classification loss for conflict types
+            # For single-label emotion datasets (MELD, CREMA-D, IEMOCAP), use multi-class
+            # Cross-Entropy loss with inverse-frequency class weighting and label smoothing.
+            # For multi-label datasets (MUStARD, CASE), preserve multi-label Focal BCE loss.
             if conflict_type_labels is not None:
-                eps = self.label_smoothing
-                smooth_labels = conflict_type_labels.float().clamp(eps, 1.0 - eps)
+                is_single_label_batch = False
+                if dataset_names is not None:
+                    is_single_label_batch = all(n in ("meld", "cremad", "iemocap") for n in dataset_names)
+                else:
+                    is_single_label_batch = bool((conflict_type_labels.sum(dim=-1) <= 1.0 + 1e-4).all())
 
-                # Focal loss on all conflict-emotion slots (anger, disgust, fear = 0,1,2)
-                # which are the minority classes across all datasets.
-                type_loss = focal_bce_loss(
-                    logits_type,
-                    smooth_labels,
-                    alpha=0.75,
-                    gamma=2.0,
-                    # self.pos_weight is already a registered buffer — PyTorch
-                    # moves it to the model device automatically via .to(device).
-                    # Calling .to(audio.device) inside forward() created a
-                    # temporary tensor every step (minor but wasteful).
-                    pos_weight=self.pos_weight,
-                )
-                losses.append(type_loss)
+                if is_single_label_batch and self.use_cross_entropy:
+                    target_cls = conflict_type_labels.argmax(dim=-1)
+                    weights = self.class_weights if self.use_class_weights else None
+                    type_loss = nn.functional.cross_entropy(
+                        logits_type,
+                        target_cls,
+                        weight=weights,
+                        label_smoothing=self.label_smoothing,
+                    )
+                    losses.append(type_loss)
+                elif dataset_names is not None and any(n in ("meld", "cremad", "iemocap") for n in dataset_names) and self.use_cross_entropy:
+                    sl_mask = torch.tensor(
+                        [n in ("meld", "cremad", "iemocap") for n in dataset_names],
+                        device=logits_type.device,
+                        dtype=torch.bool,
+                    )
+                    weights = self.class_weights if self.use_class_weights else None
+                    ce_loss = nn.functional.cross_entropy(
+                        logits_type[sl_mask],
+                        conflict_type_labels[sl_mask].argmax(dim=-1),
+                        weight=weights,
+                        label_smoothing=self.label_smoothing,
+                    )
+                    ml_mask = ~sl_mask
+                    eps = self.label_smoothing
+                    smooth_labels = conflict_type_labels[ml_mask].float().clamp(eps, 1.0 - eps)
+                    bce_loss = focal_bce_loss(
+                        logits_type[ml_mask],
+                        smooth_labels,
+                        alpha=0.75,
+                        gamma=2.0,
+                        pos_weight=self.pos_weight,
+                    )
+                    losses.append((ce_loss * sl_mask.sum() + bce_loss * ml_mask.sum()) / logits_type.size(0))
+                else:
+                    eps = self.label_smoothing
+                    smooth_labels = conflict_type_labels.float().clamp(eps, 1.0 - eps)
+                    type_loss = focal_bce_loss(
+                        logits_type,
+                        smooth_labels,
+                        alpha=0.75,
+                        gamma=2.0,
+                        pos_weight=self.pos_weight,
+                    )
+                    losses.append(type_loss)
             else:
                 losses.append((logits_type * 0.0).sum())
 

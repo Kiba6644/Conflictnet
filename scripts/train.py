@@ -161,6 +161,10 @@ def parse_args(argv=None):
                    help="DataLoader worker processes. Default 0 (single process). Set >0 if running in an environment with sufficient shared memory.")
     p.add_argument("--pt_dir", type=str, default=None,
                    help="Path to precomputed features directory (sets CONFLICTNET_PT_DIR automatically)")
+    p.add_argument("--modality_dropout", type=float, default=0.15,
+                   help="Probability of dropping either audio or text modality during training (default: 0.15)")
+    p.add_argument("--no_class_weights", action="store_true",
+                   help="Disable inverse-frequency class weighting for multi-class cross-entropy loss")
     return p.parse_args(argv)
 
 
@@ -244,6 +248,8 @@ def main(args=None):
             unfreeze_audio_layers=args.unfreeze_audio_layers,
             use_adaptive_router=args.use_adaptive_router,
             router_entropy_reg=args.router_entropy_reg,
+            modality_dropout_prob=args.modality_dropout,
+            use_class_weights=not args.no_class_weights,
         )
 
     is_ddp_run = local_rank != -1

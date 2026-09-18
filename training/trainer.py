@@ -362,13 +362,13 @@ class ConflictNetTrainer:
             if conv_ids and isinstance(conv_ids, list):
                 str_conv_ids: list[str] = [str(x) for x in conv_ids]
                 model_embed_dim = getattr(self.model, "embed_dim", 256)
-                embed_dim_val = model_embed_dim if isinstance(model_embed_dim, int) else 256
-                ctx_embeds, ctx_padding, _ = self.ctx_cache.get_batch_context(
-                    str_conv_ids, embed_dim=embed_dim_val, turn_indices=turn_indices
+                ctx_embeds, ctx_padding, ctx_roles, _ = self.ctx_cache.get_batch_context(
+                    str_conv_ids, embed_dim=embed_dim_val, turn_indices=turn_indices, return_roles=True
                 )
             else:
                 ctx_embeds = None
                 ctx_padding = None
+                ctx_roles = None
             # Extract embeddings from frozen inference models outside DDP scope
             # to prevent their execution from deadlocking DDP's asynchronous buffer broadcast.
             _model_inner = getattr(self.model, "module", self.model)
@@ -397,6 +397,7 @@ class ConflictNetTrainer:
                     context_embeds=ctx_embeds,
                     context_padding=ctx_padding,
                     speaker_roles=batch.get("speaker_roles"),
+                    context_speaker_roles=ctx_roles,
                     prosody_z=batch.get("prosody_z"),
                     word_timestamps=batch.get("word_timestamps"),
                     token_word_boundaries=batch.get("token_word_boundaries"),
@@ -407,10 +408,15 @@ class ConflictNetTrainer:
                     dataset_names=batch.get("dataset_names"),
                 )
 
-            # Update context cache with current turn fused embeddings
+            # Update context cache with current turn fused embeddings and speaker roles
             if conv_ids and isinstance(conv_ids, list) and output.fused_embed is not None:
                 str_conv_ids: list[str] = [str(x) for x in conv_ids]
-                self.ctx_cache.batch_update(str_conv_ids, output.fused_embed, turn_indices=turn_indices)
+                self.ctx_cache.batch_update(
+                    str_conv_ids,
+                    output.fused_embed,
+                    turn_indices=turn_indices,
+                    speaker_roles=batch.get("speaker_roles"),
+                )
 
             loss = output.loss
             if loss is None or not loss.requires_grad:
@@ -575,11 +581,12 @@ class ConflictNetTrainer:
                 # the actual value, causing a shape mismatch crash.
                 _model_inner = _model_for_eval
                 _embed_dim = getattr(_model_inner, "embed_dim", 256)
-                ctx_embeds, ctx_padding, _ = self.ctx_cache.get_batch_context(
+                ctx_embeds, ctx_padding, ctx_roles, _ = self.ctx_cache.get_batch_context(
                     str_conv_ids,
                     embed_dim=_embed_dim,
                     turn_indices=turn_indices,
-                ) if str_conv_ids else (None, None, [])
+                    return_roles=True,
+                ) if str_conv_ids else (None, None, None, [])
                 # Inference bypass for evaluate as well
                 precomputed_audio_embed = None
                 precomputed_speaker_embed = None
@@ -600,24 +607,28 @@ class ConflictNetTrainer:
                     # partner and deadlock after 300 s.
                     dataset_names_batch = batch.get("dataset_names", None)
                     output = _model_for_eval(
-                    audio=batch["audio"],
-                    input_ids=batch["input_ids"],
-                    attention_mask=batch["attention_mask"],
-                    audio_attention_mask=batch.get("audio_attention_mask"),
-                    precomputed_audio_embed=precomputed_audio_embed,
-                    precomputed_speaker_embed=precomputed_speaker_embed,
-                    precomputed_audio_frames=batch.get("audio_frames"),
-                    prosody_z=batch.get("prosody_z"),
-                    context_embeds=ctx_embeds,
-                    context_padding=ctx_padding,
-                    speaker_roles=batch.get("speaker_roles"),
-                    word_timestamps=batch.get("word_timestamps"),
-                    token_word_boundaries=batch.get("token_word_boundaries"),
-                    dataset_names=dataset_names_batch,
-                )
+                        audio=batch["audio"],
+                        input_ids=batch["input_ids"],
+                        attention_mask=batch["attention_mask"],
+                        audio_attention_mask=batch.get("audio_attention_mask"),
+                        precomputed_audio_embed=precomputed_audio_embed,
+                        precomputed_speaker_embed=precomputed_speaker_embed,
+                        precomputed_audio_frames=batch.get("audio_frames"),
+                        prosody_z=batch.get("prosody_z"),
+                        context_embeds=ctx_embeds,
+                        context_padding=ctx_padding,
+                        speaker_roles=batch.get("speaker_roles"),
+                        context_speaker_roles=ctx_roles,
+                        word_timestamps=batch.get("word_timestamps"),
+                        token_word_boundaries=batch.get("token_word_boundaries"),
+                        dataset_names=dataset_names_batch,
+                    )
                 if str_conv_ids and output.fused_embed is not None:
                     self.ctx_cache.batch_update(
-                        str_conv_ids, output.fused_embed, turn_indices=turn_indices
+                        str_conv_ids,
+                        output.fused_embed,
+                        turn_indices=turn_indices,
+                        speaker_roles=batch.get("speaker_roles"),
                     )
                 all_probs.append(output.probs_type.float().cpu().numpy())
                 all_labels.append(batch["conflict_type_labels"].cpu().numpy())

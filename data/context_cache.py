@@ -37,90 +37,118 @@ class ContextCache:
     def __init__(self, max_turns: int = 8, device: str = "cpu"):
         self.max_turns = max_turns
         self.device = device
-        # Store an optional turn index with every embedding.  Training batches
-        # are shuffled, so append order alone can otherwise leak future dialogue
-        # turns into the current sample's context.
-        self._cache: Dict[str, List[Tuple[Optional[int], torch.Tensor]]] = {}
+        # Store turn index, embedding, and speaker role with every entry.
+        self._cache: Dict[str, List[Tuple[Optional[int], torch.Tensor, int]]] = {}
 
-    def get_context(self, conv_id: str, before_turn: Optional[int] = None) -> Optional[torch.Tensor]:
+    def get_context(
+        self, conv_id: str, before_turn: Optional[int] = None
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Get context history for a conversation.
 
         Returns:
-            ``(T_ctx, embed_dim)`` tensor of past turns, or None if
-            the conversation has no history yet.
+            ``(embeds, speaker_roles)`` tuple:
+            - ``embeds: (T_ctx, embed_dim)`` tensor of past turns, or None.
+            - ``speaker_roles: (T_ctx,)`` tensor of speaker roles, or None.
         """
         if conv_id not in self._cache:
-            return None
+            return None, None
         history = self._cache[conv_id]
         if before_turn is not None:
-            # Indexed turns are only valid if strictly earlier. Unindexed
-            # histories are retained for datasets that do not expose turns.
-            history = [(turn, embed) for turn, embed in history if turn is None or turn < before_turn]
+            history = [item for item in history if item[0] is None or item[0] < before_turn]
         if not history:
-            return None
-        if all(turn is not None for turn, _ in history):
+            return None, None
+        if all(item[0] is not None for item in history):
             history = sorted(history, key=lambda item: item[0])
         history = history[-self.max_turns:]
-        return torch.cat([embed for _, embed in history], dim=0)
+        embeds = torch.cat([item[1] for item in history], dim=0)
+        roles = torch.tensor([item[2] for item in history], dtype=torch.long)
+        return embeds, roles
 
     def get_batch_context(
         self,
         conv_ids: List[str],
         embed_dim: int = 256,
         turn_indices: Optional[List[int]] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, List[str]]:
+        return_roles: bool = False,
+    ):
         """Get padded context for a batch of conversations.
 
+        Args:
+            conv_ids: List of conversation IDs.
+            embed_dim: Dimension of turn embeddings.
+            turn_indices: Optional current turn indices for causal slicing.
+            return_roles: If True, returns 4-tuple including context speaker roles.
+                          If False, returns 3-tuple for backwards compatibility.
+
         Returns:
-            - ``context_embeds: (B, T_pad, embed_dim)`` — zero-padded context
-              sequences. Samples with no history get all-zero context.
-            - ``context_padding: (B, T_pad)`` bool mask (True = padded).
-            - ``context_conversations: (B,)`` same conv_ids.
+            If return_roles is False:
+                - ``context_embeds: (B, T_pad, embed_dim)``
+                - ``context_padding: (B, T_pad)`` bool mask (True = padded)
+                - ``context_conversations: (B,)`` conv_ids
+            If return_roles is True:
+                - ``context_embeds: (B, T_pad, embed_dim)``
+                - ``context_padding: (B, T_pad)`` bool mask
+                - ``context_speaker_roles: (B, T_pad)`` long tensor of speaker roles
+                - ``context_conversations: (B,)`` conv_ids
         """
         B = len(conv_ids)
-        contexts: List[Optional[torch.Tensor]] = []
+        contexts: List[Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]] = []
         for i, conv_id in enumerate(conv_ids):
             current_turn = turn_indices[i] if turn_indices is not None else None
             contexts.append(self.get_context(conv_id, before_turn=current_turn))
         max_len = max(
-            (ctx.size(0) for ctx in contexts if ctx is not None), default=0
+            (ctx_e.size(0) for ctx_e, _ in contexts if ctx_e is not None), default=0
         )
         if max_len == 0:
             embeds = torch.zeros(B, 1, embed_dim, device=self.device)
             padding = torch.ones(B, 1, dtype=torch.bool, device=self.device)
+            roles = torch.zeros(B, 1, dtype=torch.long, device=self.device)
+            if return_roles:
+                return embeds, padding, roles, conv_ids
             return embeds, padding, conv_ids
 
         T = max(1, min(max_len, self.max_turns))
         embeds = torch.zeros(B, T, embed_dim, device=self.device)
         padding = torch.ones(B, T, dtype=torch.bool, device=self.device)
+        roles = torch.zeros(B, T, dtype=torch.long, device=self.device)
 
-        for i, ctx in enumerate(contexts):
-            if ctx is not None:
-                ctx = ctx.to(self.device)
-                n = min(ctx.size(0), T)
-                embeds[i, -n:] = ctx[-n:]
+        for i, (ctx_e, ctx_r) in enumerate(contexts):
+            if ctx_e is not None and ctx_r is not None:
+                ctx_e = ctx_e.to(self.device)
+                ctx_r = ctx_r.to(self.device)
+                n = min(ctx_e.size(0), T)
+                embeds[i, -n:] = ctx_e[-n:]
+                roles[i, -n:] = ctx_r[-n:]
                 padding[i, -n:] = False
 
+        if return_roles:
+            return embeds, padding, roles, conv_ids
         return embeds, padding, conv_ids
 
-    def update(self, conv_id: str, turn_embed: torch.Tensor, turn_index: Optional[int] = None):
-        """Append a single turn embedding to conversation history.
+    def update(
+        self,
+        conv_id: str,
+        turn_embed: torch.Tensor,
+        turn_index: Optional[int] = None,
+        speaker_role: int = 0,
+    ):
+        """Append a single turn embedding and speaker role to conversation history.
 
         Args:
             conv_id: Conversation identifier.
             turn_embed: ``(embed_dim,)`` or ``(1, embed_dim)`` tensor.
+            turn_index: Optional turn index.
+            speaker_role: Integer speaker role in [0, 15].
         """
         fe = turn_embed.detach()
         if fe.dim() == 1:
             fe = fe.unsqueeze(0)
         history = self._cache.setdefault(conv_id, [])
         if turn_index is not None:
-            # A padded DistributedSampler can repeat examples. Replace rather
-            # than duplicate an already-seen turn.
-            history[:] = [(turn, embed) for turn, embed in history if turn != turn_index]
-        history.append((turn_index, fe))
+            history[:] = [item for item in history if item[0] != turn_index]
+        history.append((turn_index, fe, int(speaker_role)))
         if len(history) > self.max_turns * 2:
-            if all(turn is not None for turn, _ in history):
+            if all(item[0] is not None for item in history):
                 history.sort(key=lambda item: item[0])
             del history[:-self.max_turns]
 
@@ -129,14 +157,15 @@ class ContextCache:
         conv_ids: List[str],
         turn_embeds: torch.Tensor,
         turn_indices: Optional[List[int]] = None,
+        speaker_roles: Optional[Any] = None,
     ):
         """Update cache for all samples in a batch in chronological turn order.
 
         Args:
             conv_ids: Conversation identifiers for each sample.
             turn_embeds: ``(B, embed_dim)`` — one per sample.
-            turn_indices: Optional list of turn indices. If provided, samples
-                are updated in turn order so the cache reflects the dialogue sequence.
+            turn_indices: Optional list of turn indices.
+            speaker_roles: Optional ``(B,)`` tensor or list of speaker role ints.
         """
         if turn_indices is not None:
             order = sorted(range(len(conv_ids)), key=lambda i: turn_indices[i])
@@ -144,7 +173,11 @@ class ContextCache:
             order = range(len(conv_ids))
         for i in order:
             turn_index = turn_indices[i] if turn_indices is not None else None
-            self.update(conv_ids[i], turn_embeds[i], turn_index=turn_index)
+            if speaker_roles is not None:
+                role = speaker_roles[i].item() if isinstance(speaker_roles, torch.Tensor) else int(speaker_roles[i])
+            else:
+                role = 0
+            self.update(conv_ids[i], turn_embeds[i], turn_index=turn_index, speaker_role=role)
 
     def clear(self, conv_id: Optional[str] = None):
         """Clear cache for one or all conversations."""

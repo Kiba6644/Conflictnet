@@ -202,6 +202,30 @@ The codebase includes specialized standalone utilities designed for training acc
 - **Root Cause**: In multi-GPU DDP runs, if Rank 0 encountered an OOM or data error during validation metric broadcast, non-zero ranks remained blocked forever waiting on `torch.distributed.broadcast`.
 - **Resolution**: Added sentinel broadcast in `trainer.py:729` sending `[-1.0, ...]` to unblock worker ranks before re-raising exceptions.
 
+### 5. Multi-Class Cross-Entropy with Class Weighting & Label Smoothing — IMPLEMENTED
+- **Problem**: Multi-label Focal BCE treated 6 mutually-exclusive emotion classes as independent binary problems. Minority classes (Fear ~2.5%, Disgust ~3%) received near-zero probability output (<0.05).
+- **Resolution**:
+  - For single-label emotion datasets (MELD, CREMA-D, IEMOCAP), routed loss to `nn.functional.cross_entropy` with inverse-frequency class weights `class_weights = torch.tensor([1.5, 3.5, 3.5, 1.0, 0.4, 2.2])` and label smoothing `0.05`.
+  - Multi-label datasets (MUStARD, CASE) retain Focal BCE.
+  - In `ConflictClassifier`, single-label datasets compute normalized Softmax probabilities (`torch.softmax(logits_type, dim=-1)`), while multi-label datasets output Sigmoid probabilities.
+  - Added `--no_class_weights` CLI flag to allow unweighted cross-entropy ablation.
+
+### 6. Stochastic Modality Dropout (Audio-Text Regularization) — IMPLEMENTED
+- **Problem**: DeBERTa-v3 is significantly stronger than raw acoustic backends on textual emotion clues, causing text dominance where acoustic emotion representations are ignored during multimodal fusion.
+- **Resolution**:
+  - In `ConflictNet.fuse`, stochastically zero out audio ($p=0.15$) or text ($p=0.15$) embeddings with mutually-exclusive random masks during training.
+  - Forces the network to learn robust acoustic emotion representations from audio alone when text is dropped, while keeping InfoNCE contrastive alignment inputs intact.
+  - Inactive during evaluation (`self.training == False`).
+  - Configurable via `--modality_dropout <float>` (default: 0.15).
+
+### 7. Multi-Party Conversational Speaker Modeling — IMPLEMENTED
+- **Problem**: `SpeakerRoleEmbedding` previously supported only 2 dyadic speakers (`nn.Embedding(2, embed_dim)`). Multiparty conversations (e.g. MELD 6 Friends characters) had character identities collapsed.
+- **Resolution**:
+  - Extended `SpeakerRoleEmbedding` to `num_speakers=16` with clamped indices `[0, 15]`.
+  - Added speaker role extraction in `data/datasets.py:_collate_core` mapping MELD characters (Chandler=0, Joey=1, Monica=2, Phoebe=3, Rachel=4, Ross=5) and hashing other speakers.
+  - Updated `ContextCache` to store and retrieve `(turn_index, turn_embed, speaker_role)` tuples with backwards-compatible `return_roles=True`.
+  - Assembled sequence-aligned `full_speaker_roles` `(B, T_ctx + 1)` in `ConflictNet.forward` and passed to `TransformerTemporalContext`.
+
 ---
 
 ## 6. Directory Map & File Index
