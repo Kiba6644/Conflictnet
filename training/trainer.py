@@ -361,7 +361,8 @@ class ConflictNetTrainer:
                 turn_indices = turn_indices.cpu().tolist()
             if conv_ids and isinstance(conv_ids, list):
                 str_conv_ids: list[str] = [str(x) for x in conv_ids]
-                model_embed_dim = getattr(self.model, "embed_dim", 256)
+                _model_inner = getattr(self.model, "module", self.model)
+                embed_dim_val = getattr(_model_inner, "embed_dim", 256)
                 ctx_embeds, ctx_padding, ctx_roles, _ = self.ctx_cache.get_batch_context(
                     str_conv_ids, embed_dim=embed_dim_val, turn_indices=turn_indices, return_roles=True
                 )
