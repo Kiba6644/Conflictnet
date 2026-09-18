@@ -226,6 +226,10 @@ The codebase includes specialized standalone utilities designed for training acc
   - Updated `ContextCache` to store and retrieve `(turn_index, turn_embed, speaker_role)` tuples with backwards-compatible `return_roles=True`.
   - Assembled sequence-aligned `full_speaker_roles` `(B, T_ctx + 1)` in `ConflictNet.forward` and passed to `TransformerTemporalContext`.
 
+### 8. `NameError: embed_dim_val` in `trainer.train_epoch` — RESOLVED
+- **Root Cause**: `embed_dim_val` definition was accidentally dropped during a line replacement in `train_epoch`.
+- **Resolution**: Defined `_model_inner = getattr(self.model, "module", self.model)` and `embed_dim_val = getattr(_model_inner, "embed_dim", 256)` before `get_batch_context()`. Verified with live `train_epoch` execution.
+
 ---
 
 ## 6. Directory Map & File Index
