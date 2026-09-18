@@ -46,6 +46,8 @@ def parse_args():
     p.add_argument("--mustard_wav_dir", type=str, default="utterances_final", help="Path to MUStARD wav files")
     p.add_argument("--case_root", type=str, default=None, help="CASE 2026 benchmark root")
     p.add_argument("--meld_root", type=str, default=None, help="MELD dataset root for evaluation")
+    p.add_argument("--max_samples", "--max-samples", "--max_sample_size", "--max-sample-size", dest="max_samples", type=int, default=None,
+                   help="Cap eval set to N samples (stratified)")
     p.add_argument("--meld_max_samples", type=int, default=None,
                    help="Cap MELD eval set to N samples (stratified); matches train-time setting")
     p.add_argument("--audio_encoder", type=str, default="emotion2vec",
@@ -61,6 +63,8 @@ def parse_args():
     p.add_argument("--output_dir", type=str, default="results")
     p.add_argument("--prosody_stats", type=str, default=None,
                    help="Path to .pt file from compute_prosody_stats.py with per-utterance z-scores")
+    p.add_argument("--threshold", type=float, default=None,
+                   help="Classification threshold for conflict detection (defaults to best_binary_thresh from checkpoint meta if available, else 0.5)")
     return p.parse_args()
 
 
@@ -82,6 +86,28 @@ def main():
     model.to(args.device)
     model.eval()
     logger.info(f"[Eval] Loaded checkpoint from {args.checkpoint}")
+
+    # Determine evaluation threshold (from CLI flag, checkpoint metadata, or default 0.5)
+    eval_threshold = args.threshold
+    if eval_threshold is None:
+        ckpt_p = Path(checkpoint_path)
+        ckpt_meta_p = ckpt_p.parent / f"{ckpt_p.stem}_meta.json"
+        if not ckpt_meta_p.exists():
+            # Handle possible suffixes like .safetensors or .pt
+            base_name = ckpt_p.name.replace(".safetensors", "").replace(".pt", "")
+            ckpt_meta_p = ckpt_p.parent / f"{base_name}_meta.json"
+        if ckpt_meta_p.exists():
+            try:
+                with open(ckpt_meta_p) as f:
+                    ckpt_meta = json.load(f)
+                eval_threshold = float(ckpt_meta.get("best_binary_thresh", 0.5))
+                logger.info(f"[Eval] Loaded calibrated binary threshold {eval_threshold:.4f} from {ckpt_meta_p}")
+            except Exception:
+                eval_threshold = 0.5
+        else:
+            eval_threshold = 0.5
+    else:
+        logger.info(f"[Eval] Using explicitly specified threshold: {eval_threshold:.4f}")
 
     # Load pre-computed prosody z-scores if available
     prosody_lookup = None
@@ -122,7 +148,8 @@ def main():
             split="val"
         ))
     if args.meld_root:
-        meld_kwargs = {"max_samples": args.meld_max_samples} if args.meld_max_samples else {}
+        eval_max = args.meld_max_samples or getattr(args, "max_samples", None)
+        meld_kwargs = {"max_samples": eval_max} if eval_max else {}
         # Evaluate on the held-out test split (MELD has an official test set)
         eval_datasets.append(MELDDataset(args.meld_root, split="test", **meld_kwargs))
     if args.case_root and CASEDataset is not None:
@@ -204,7 +231,7 @@ def main():
 
     sev_pred = np.concatenate(all_severity_pred) if all_severity_pred else None
     sev_true = np.concatenate(all_severity_true) if all_severity_true else None
-    metrics = compute_all_metrics(all_probs, all_labels, sev_pred, sev_true)
+    metrics = compute_all_metrics(all_probs, all_labels, sev_pred, sev_true, type_threshold=eval_threshold)
     print_metrics(metrics)
 
     with open(out_dir / "metrics.json", "w") as f:
@@ -222,7 +249,7 @@ def main():
         # Use conflict indices (0, 1, 2 = anger, disgust, fear)
         _n_conflict = min(3, all_labels.shape[1])
         binary_true = all_labels[:, :_n_conflict].any(axis=1).astype(int)
-        binary_pred = (all_probs[:, :_n_conflict] >= 0.5).any(axis=1).astype(int)
+        binary_pred = (all_probs[:, :_n_conflict] >= eval_threshold).any(axis=1).astype(int)
         
         try:
             fairness_report = fairness_audit(binary_pred, binary_true, sensitive_dict)

@@ -240,35 +240,6 @@ class ConflictNetTrainer:
             num_training_steps=max(1, steps_per_epoch * epochs),
         )
 
-    def reset_lr_and_scheduler(self, lr: float, total_epochs: int, warmup_steps: int = 0):
-        """Reset parameter group learning rates with LLRD and build a fresh cosine scheduler."""
-        wavlm_backbone_lr  = lr * (1.0 / 6.0)
-        audio_encoder_lr   = lr * (1.0 / 3.0)
-        deberta_lower_lr   = lr * (1.0 / 3.0)
-        deberta_lora_lr    = lr * (2.0 / 3.0)
-        head_lr            = lr * (5.0 / 3.0)
-        classifier_lr      = lr * (10.0 / 3.0)
-
-        logger.info(
-            f"[Optimizer] Rebuilding scheduler with base lr={lr:.2e} over {total_epochs} epochs | "
-            f"wavlm_backbone={wavlm_backbone_lr:.2e} | audio_enc={audio_encoder_lr:.2e} | "
-            f"deberta_lower={deberta_lower_lr:.2e} | deberta_lora={deberta_lora_lr:.2e} | "
-            f"heads={head_lr:.2e} | classifier={classifier_lr:.2e}"
-        )
-
-        for group in self.optimizer.param_groups:
-            group["lr"] = lr
-
-        grad_accum_steps = int(self.cfg.get("gradient_accumulation_steps", 1))
-        steps_per_epoch = max(1, len(self.train_loader) // grad_accum_steps)
-        self.scheduler = get_warmup_cosine_scheduler(
-            self.optimizer,
-            num_warmup_steps=warmup_steps,
-            num_training_steps=max(1, steps_per_epoch * total_epochs),
-        )
-        self._best_val_f1 = 0.0
-        self._patience_counter = 0
-
     def _setup_wandb(self):
         self.use_wandb = False
         local_rank = int(os.environ.get("LOCAL_RANK", "0"))
@@ -661,9 +632,9 @@ class ConflictNetTrainer:
             conflict_prob = probs[:, :3].max(axis=1)
             binary_int = binary.astype(int)
 
-            # Fixed-threshold binary F1 at 0.5 — used for model selection (no val leakage)
+            # Fixed-threshold binary F1 at 0.5 (reference uncalibrated baseline)
             bin_pred_fixed = (conflict_prob > 0.5).astype(int)
-            f1_binary = f1_score(binary_int, bin_pred_fixed, zero_division=0)
+            f1_binary_fixed = f1_score(binary_int, bin_pred_fixed, zero_division=0)
 
             try:
                 auc_binary = roc_auc_score(binary_int, conflict_prob)
@@ -671,17 +642,22 @@ class ConflictNetTrainer:
                 auc_binary = 0.5  # degenerate split with only one class present
 
             # --- Calibrated binary threshold sweep ---
-            # Sweeps 0.05–0.95 to find the threshold that maximises binary F1 on the val set.
-            # Reported as a separate metric so model-selection (val/f1_weighted) stays clean.
+            # Sweeps 0.05–0.95 to find optimal decision threshold for imbalanced conflict detection.
+            # Sigmoid outputs on imbalanced datasets peak below 0.5; calibration identifies
+            # the true decision boundary maximizing binary F1.
             best_binary_thresh = 0.5
-            best_binary_f1_cal = f1_binary
+            best_binary_f1_cal = 0.0
             for _thresh in np.arange(0.05, 0.96, 0.05):
-                _preds = (conflict_prob > _thresh).astype(int)
+                _preds = (conflict_prob >= _thresh).astype(int)
                 _f1 = f1_score(binary_int, _preds, zero_division=0)
                 if _f1 > best_binary_f1_cal:
                     best_binary_f1_cal = _f1
-                    best_binary_thresh = float(_thresh)
+                    best_binary_thresh = float(round(_thresh, 2))
             self._best_binary_thresh = best_binary_thresh
+
+            # Primary binary F1: Use calibrated threshold so model selection and reporting
+            # reflect true conflict detection capability rather than an arbitrary 0.5 cutoff.
+            f1_binary = best_binary_f1_cal
 
             # --- Per-class AP, averaged over classes that have at least one positive ---
             per_class_ap = []
@@ -693,50 +669,53 @@ class ConflictNetTrainer:
                         pass
             macro_ap = float(np.mean(per_class_ap)) if per_class_ap else 0.0
 
-            # --- Prior-balanced argmax F1 (PRIMARY metric for model selection) ---
-            # MELD/CREMA-D are highly imbalanced (Neutral is ~59%, Fear is ~3%).
-            # When using independent multi-label sigmoids, raw Neutral probability
-            # is almost always higher than rare minority emotions. Normalising by class
-            # priors (probs / class_priors) prevents majority-class collapse and evaluates
-            # true predictive power across all 6 emotion categories.
+            # --- Emotion Classification F1 (PRIMARY metric for model selection) ---
+            # For single-label emotion datasets (MELD, CREMA-D), standard multi-class
+            # argmax provides true classification performance. Prior division (probs / class_priors)
+            # is explicitly avoided because dividing by minority priors (Fear ~0.025) scales minority
+            # noise by 40× and collapses 100% of predictions into false-positive Fear.
             from sklearn.metrics import f1_score as _f1
-            y_true_cls = np.argmax(labels, axis=1)   # (N,) integer class indices
+            is_single_label = (labels.sum(axis=1) <= 1).all()
 
-            class_counts = labels.sum(axis=0)
-            class_priors = class_counts / np.maximum(class_counts.sum(), 1.0)
-            class_priors = np.maximum(class_priors, 1e-4)
+            if is_single_label:
+                y_true_cls = np.argmax(labels, axis=1)
+                y_pred_cls = np.argmax(probs, axis=1)
+                f1_weighted = _f1(y_true_cls, y_pred_cls, average="weighted", zero_division=0)
+                f1_macro    = _f1(y_true_cls, y_pred_cls, average="macro",    zero_division=0)
+            else:
+                # Multi-label datasets (MUStARD, CASE)
+                preds = (probs >= 0.5).astype(int)
+                f1_weighted = _f1(labels, preds, average="weighted", zero_division=0)
+                f1_macro    = _f1(labels, preds, average="macro",    zero_division=0)
 
-            # Balanced prediction: relative elevation above background class prior
-            balanced_scores = probs / class_priors
-            y_pred_cls = np.argmax(balanced_scores, axis=1)
-
-            f1_weighted = _f1(y_true_cls, y_pred_cls, average="weighted", zero_division=0)
-            f1_macro    = _f1(y_true_cls, y_pred_cls, average="macro",    zero_division=0)
-
-            # --- Calibrated per-class threshold sweep (for reporting / multi-label) ---
+            # --- Calibrated per-class threshold sweep (for multi-label reporting) ---
             best_class_thresh = 0.5
-            best_f1_weighted_cal = f1_weighted
+            best_f1_weighted_cal = 0.0
+            best_f1_macro_cal = 0.0
             for _thresh in np.arange(0.05, 0.96, 0.05):
                 _preds = (probs >= _thresh).astype(int)
-                _f1w_true = _f1(labels, _preds, average="weighted", zero_division=0)
-                if _f1w_true > best_f1_weighted_cal:
-                    best_f1_weighted_cal = _f1w_true
-                    best_class_thresh = float(_thresh)
+                _f1w = _f1(labels, _preds, average="weighted", zero_division=0)
+                _f1m = _f1(labels, _preds, average="macro",    zero_division=0)
+                if _f1w > best_f1_weighted_cal:
+                    best_f1_weighted_cal = _f1w
+                    best_f1_macro_cal = _f1m
+                    best_class_thresh = float(round(_thresh, 2))
             self._best_class_thresh = best_class_thresh
-            f1_macro_cal    = f1_macro
+            f1_macro_cal    = best_f1_macro_cal
             f1_weighted_cal = best_f1_weighted_cal
 
             metrics = {
-                # ── Uncalibrated (threshold=0.5) — used for checkpoint selection ──────
-                "val/f1_binary":   float(f1_binary),
-                "val/auc_binary":  float(auc_binary),
-                "val/macro_ap":    float(macro_ap),
-                "val/f1_macro":    float(f1_macro),
+                # ── Primary Validation Metrics (used for checkpoint selection) ──────
+                "val/f1_binary":       float(f1_binary),
+                "val/auc_binary":      float(auc_binary),
+                "val/macro_ap":        float(macro_ap),
+                "val/f1_macro":        float(f1_macro),
                 # val/f1_weighted drives best-checkpoint and early-stopping logic.
-                "val/f1_weighted": float(f1_weighted),
-                # ── Calibrated (threshold swept on val set) — for reporting only ──────
+                "val/f1_weighted":     float(f1_weighted),
+                # ── Calibrated / Threshold Metrics (for reporting & analysis) ──────
                 "val/f1_binary_cal":   float(best_binary_f1_cal),
                 "val/binary_thresh":   float(best_binary_thresh),
+                "val/f1_binary_raw05": float(f1_binary_fixed),
                 "val/f1_macro_cal":    float(f1_macro_cal),
                 "val/f1_weighted_cal": float(f1_weighted_cal),
                 "val/class_thresh":    float(best_class_thresh),

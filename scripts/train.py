@@ -78,8 +78,14 @@ def parse_args(argv=None):
     p.add_argument("--mustard_wav_dir", type=str, default="utterances_final", help="Path to MUStARD wav files")
     p.add_argument("--cremad_root", type=str, default=None, help="CREMA-D dataset root")
     p.add_argument("--meld_root", type=str, default=None, help="MELD dataset root")
+    p.add_argument("--max_samples", "--max-samples", "--max_sample_size", "--max-sample-size", dest="max_samples", type=int, default=None,
+                   help="Cap dataset to this many samples (sets both train and val cap if not individually specified)")
+    p.add_argument("--max_train_samples", "--max-train-samples", dest="max_train_samples", type=int, default=None,
+                   help="Cap dataset train split samples (alias for meld_max_train_samples)")
+    p.add_argument("--max_val_samples", "--max-val-samples", dest="max_val_samples", type=int, default=None,
+                   help="Cap dataset val split samples (alias for meld_max_val_samples)")
     p.add_argument("--meld_max_samples", type=int, default=None,
-                   help="Legacy arg, use meld_max_train_samples instead")
+                   help="Legacy arg, use max_train_samples / meld_max_train_samples instead")
     p.add_argument("--meld_max_train_samples", type=int, default=None,
                    help="Cap MELD train split to this many samples (stratified)")
     p.add_argument("--meld_max_val_samples", type=int, default=None,
@@ -155,8 +161,6 @@ def parse_args(argv=None):
                    help="DataLoader worker processes. Default 0 (single process). Set >0 if running in an environment with sufficient shared memory.")
     p.add_argument("--pt_dir", type=str, default=None,
                    help="Path to precomputed features directory (sets CONFLICTNET_PT_DIR automatically)")
-    p.add_argument("--reset_scheduler", action="store_true",
-                   help="Reset LR and scheduler to a fresh cosine cycle when resuming with --resume_from")
     return p.parse_args(argv)
 
 
@@ -432,8 +436,11 @@ def main(args=None):
 
     if args.meld_root:
         logger.info(f"[Rank {local_rank}] Loading MELD dataset...")
-        train_max = args.meld_max_train_samples or args.meld_max_samples
-        val_max = args.meld_max_val_samples or args.meld_max_samples
+        general_max = getattr(args, "max_samples", None)
+        train_max = args.meld_max_train_samples or getattr(args, "max_train_samples", None) or args.meld_max_samples or general_max
+        val_max = args.meld_max_val_samples or getattr(args, "max_val_samples", None) or args.meld_max_samples or general_max
+        if train_max or val_max:
+            logger.info(f"[Rank {local_rank}] MELD sample limits: train_max={train_max}, val_max={val_max}")
         
         meld_train_kwargs = {"max_samples": train_max} if train_max else {}
         meld_val_kwargs = {"max_samples": val_max} if val_max else {}
@@ -614,17 +621,6 @@ def main(args=None):
     start_epoch = 0
     if args.resume_from:
         start_epoch = trainer.load_checkpoint(args.resume_from)
-        if args.reset_scheduler:
-            target_total = args.epochs or cfg.get("epochs", 35)
-            remaining_epochs = max(1, target_total - start_epoch)
-            if target_total <= start_epoch:
-                remaining_epochs = args.resume_epochs
-                args.epochs = start_epoch + args.resume_epochs
-            trainer.reset_lr_and_scheduler(
-                lr=float(args.lr or cfg.get("lr", 5e-5)),
-                total_epochs=remaining_epochs,
-                warmup_steps=int(args.warmup_steps or 0),
-            )
 
     retries = 0
 
