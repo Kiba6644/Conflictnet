@@ -123,7 +123,6 @@ class ExperimentConfig:
             "use_speaker_adaptive_threshold": "no_speaker_adaptive_threshold",
             "use_baseline_subtract": "no_baseline_subtract",
             "use_word_divergence": "no_word_divergence",
-            "amp": "no_amp",
             "use_class_weights": "no_class_weights",
         }
 
@@ -137,6 +136,8 @@ class ExperimentConfig:
                 continue  # runtime, not CLI-expressible
             else:
                 out[field_name] = val
+        out["amp"] = self.amp
+        out["no_amp"] = not self.amp
         return out
 
     def __post_init__(self):

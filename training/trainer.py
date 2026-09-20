@@ -280,9 +280,13 @@ class ConflictNetTrainer:
         n_total = len(transformer_layers)
         max_unfreeze = getattr(self, "_max_unfreeze_audio_layers", 16)
 
-        if epoch < 5:
+        if max_unfreeze <= 6:
+            # When a small layer budget is specified (e.g. 2-6 layers), unfreeze immediately
+            # so the audio backbone adapts from the start of training.
+            target = max_unfreeze
+        elif epoch < 3:
             target = 0
-        elif epoch < 15:
+        elif epoch < 10:
             target = min(6, max_unfreeze)
         else:
             target = max_unfreeze
@@ -482,10 +486,10 @@ class ConflictNetTrainer:
                 }
                 if output.loss_breakdown:
                     for k, v in output.loss_breakdown.items():
-                        if isinstance(v, (float, int)) and k in ("bce_type", "bce_binary", "swap_loss", "severity"):
-                            metrics[k] = float(v)
-                        elif isinstance(v, torch.Tensor) and k in ("bce_type", "bce_binary", "swap_loss", "severity"):
-                            metrics[k] = v.item()
+                        val = v.item() if isinstance(v, torch.Tensor) else float(v)
+                        if k in ("type_bce", "contrastive", "swap", "severity_mse", "bce_type", "bce_binary", "swap_loss", "severity", "supcon"):
+                            clean_k = "ce" if k in ("type_bce", "bce_type") else ("cl" if k == "contrastive" else k)
+                            metrics[clean_k] = val
                 self._log(metrics, self.global_step)
 
         # Handle remaining gradients when epoch ends mid-accumulation

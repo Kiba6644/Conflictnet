@@ -158,6 +158,10 @@ class CrossModalAttention(nn.Module):
                             kv_padding_audio = torch.cat([kv_padding_audio, pad_ext], dim=1)
                         if kv_padding_text is not None:
                             kv_padding_text = torch.cat([kv_padding_text, pad_ext], dim=1)
+                else:
+                    ctx_pad = torch.zeros(B, T, dtype=torch.bool, device=device)
+                    kv_padding_audio = torch.cat([valid_t, ctx_pad], dim=1)
+                    kv_padding_text = torch.cat([valid_a, ctx_pad], dim=1)
 
             # Audio attends to Text (+ context)
             q_audio = a_seq
@@ -241,6 +245,7 @@ class ContextGatedContrastiveLoss(nn.Module):
         context_pooled: Optional[torch.Tensor] = None,
         conflict_labels: Optional[torch.Tensor] = None,
         sarcasm_mask: Optional[torch.Tensor] = None,
+        emotion_labels: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Compute context-gated contrastive + conflict separation loss.
 
@@ -250,6 +255,9 @@ class ContextGatedContrastiveLoss(nn.Module):
             context_pooled: (B, D) pooled dialogue context (from temporal module).
             conflict_labels: (B,) float — 1.0 for conflict pairs, 0.0 otherwise.
             sarcasm_mask: (B,) bool — True if the sample is sarcasm.
+            emotion_labels: Optional (B,) integer emotion class or (B, n_classes) one-hot.
+                When provided, activates Supervised Contrastive Loss (SupCon), pulling
+                samples sharing the same emotion class together in embedding space.
 
         Returns:
             Scalar loss.
@@ -291,20 +299,47 @@ class ContextGatedContrastiveLoss(nn.Module):
             sim_a2t = sim_a2t_raw / tau
             sim_t2a = sim_t2a_raw / tau
 
-        # Standard symmetric InfoNCE
-        # BUG FIX: removed the sarcasm_mask.all() early-exit that zeroed both
-        # InfoNCE losses when an entire batch was conflict (common on MUStARD).
-        # F.cross_entropy with ignore_index=-1 handles a fully-masked batch
-        # gracefully without needing a special-case zero branch.
-        if sarcasm_mask is not None and sarcasm_mask.any():
-            labels = labels.clone()
-            labels[sarcasm_mask] = -1   # cross_entropy ignore_index=-1
-        # Guard: if ALL labels are ignored (all-sarcasm batch), cross_entropy returns NaN (0/0).
-        if (labels == -1).all():
-            return torch.zeros(1, device=labels.device, requires_grad=True).squeeze()
-        loss_a2t = F.cross_entropy(sim_a2t, labels, ignore_index=-1)
-        loss_t2a = F.cross_entropy(sim_t2a, labels, ignore_index=-1)
-        contrastive_loss = (loss_a2t + loss_t2a) / 2
+        # Supervised Contrastive Loss (SupCon) or standard symmetric InfoNCE
+        if emotion_labels is not None and not (sarcasm_mask is not None and sarcasm_mask.all()):
+            if emotion_labels.dim() == 2:
+                emotion_labels = emotion_labels.argmax(dim=-1)
+            in_batch_pos = emotion_labels.unsqueeze(1) == emotion_labels.unsqueeze(0)  # (B, B)
+            if sarcasm_mask is not None and sarcasm_mask.any():
+                in_batch_pos[sarcasm_mask] = False
+                in_batch_pos[:, sarcasm_mask] = False
+                in_batch_pos.fill_diagonal_(False)
+                in_batch_pos[~sarcasm_mask, ~sarcasm_mask] = True
+            else:
+                in_batch_pos.fill_diagonal_(True)
+
+            if sim_a2t.size(1) > B:
+                q_neg = torch.zeros(B, sim_a2t.size(1) - B, dtype=torch.bool, device=audio_embeds.device)
+                pos_mask = torch.cat([in_batch_pos, q_neg], dim=1)
+            else:
+                pos_mask = in_batch_pos
+
+            log_prob_a2t = F.log_softmax(sim_a2t, dim=-1)
+            log_prob_t2a = F.log_softmax(sim_t2a, dim=-1)
+
+            pos_count = pos_mask.sum(dim=-1, keepdim=True).clamp(min=1)
+            loss_a2t = -(pos_mask * log_prob_a2t).sum(dim=-1) / pos_count.squeeze(-1)
+            loss_t2a = -(pos_mask * log_prob_t2a).sum(dim=-1) / pos_count.squeeze(-1)
+
+            if sarcasm_mask is not None and sarcasm_mask.any():
+                valid = ~sarcasm_mask
+                contrastive_loss = (loss_a2t[valid].mean() + loss_t2a[valid].mean()) / 2 if valid.any() else torch.zeros(1, device=labels.device, requires_grad=True).squeeze()
+            else:
+                contrastive_loss = (loss_a2t.mean() + loss_t2a.mean()) / 2
+        else:
+            # Standard symmetric InfoNCE
+            if sarcasm_mask is not None and sarcasm_mask.any():
+                labels = labels.clone()
+                labels[sarcasm_mask] = -1   # cross_entropy ignore_index=-1
+            if (labels == -1).all():
+                return torch.zeros(1, device=labels.device, requires_grad=True).squeeze()
+            loss_a2t = F.cross_entropy(sim_a2t, labels, ignore_index=-1)
+            loss_t2a = F.cross_entropy(sim_t2a, labels, ignore_index=-1)
+            contrastive_loss = (loss_a2t + loss_t2a) / 2
         # Conflict separation loss: push paired audio↔text apart by margin
         # (uses un-scaled cosine similarities since margin is in cosine space)
         conflict_sep_loss = (sim_raw * 0.0).sum()

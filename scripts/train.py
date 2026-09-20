@@ -173,9 +173,12 @@ def main(args=None):
     if args is None:
         args = parse_args(argv=None)
 
-    if args.pt_dir:
+    if args.pt_dir and args.unfreeze_audio_layers == 0:
         os.environ["CONFLICTNET_PT_DIR"] = str(Path(args.pt_dir).resolve())
         logger.info(f"[ConflictNet] Set CONFLICTNET_PT_DIR={os.environ['CONFLICTNET_PT_DIR']}")
+    elif args.unfreeze_audio_layers > 0:
+        os.environ.pop("CONFLICTNET_PT_DIR", None)
+        logger.info(f"[ConflictNet] End-to-end audio fine-tuning active (unfreeze_audio_layers={args.unfreeze_audio_layers}). CONFLICTNET_PT_DIR cleared.")
 
     # torchrun workers are not guaranteed to retain the notebook shell's
     # working directory. Resolve output paths relative to this repository once
@@ -228,8 +231,16 @@ def main(args=None):
     from models.conflictnet import ConflictNet
 
     if (getattr(args, "pt_dir", None) or os.environ.get("CONFLICTNET_PT_DIR")) and args.audio_encoder != "precomputed":
-        logger.info("Using precomputed audio embeddings: setting audio_encoder to 'precomputed' to save ~2.5GB VRAM.")
-        args.audio_encoder = "precomputed"
+        if args.unfreeze_audio_layers > 0:
+            logger.info(
+                f"[ConflictNet] End-to-end audio training active (unfreeze_audio_layers={args.unfreeze_audio_layers}). "
+                f"Retaining audio_encoder='{args.audio_encoder}' for live gradient propagation."
+            )
+            args.pt_dir = None
+            os.environ.pop("CONFLICTNET_PT_DIR", None)
+        else:
+            logger.info("Using precomputed audio embeddings: setting audio_encoder to 'precomputed' to save ~2.5GB VRAM.")
+            args.audio_encoder = "precomputed"
 
     def _build_model():
         return ConflictNet(
@@ -490,8 +501,9 @@ def main(args=None):
             logger.info("[Rank 0] In-line feature extraction complete.")
     else:
         # Clear CONFLICTNET_PT_DIR to ensure load_audio loads raw audio waveforms for end-to-end WavLM training
-        os.environ["CONFLICTNET_PT_DIR"] = ""
-        logger.info(f"[Rank {local_rank}] End-to-end audio training active (unfreeze_audio_layers={args.unfreeze_audio_layers}). Raw waveforms will be passed directly to {args.audio_encoder}.")
+        os.environ.pop("CONFLICTNET_PT_DIR", None)
+        if args.unfreeze_audio_layers > 0:
+            logger.info(f"[Rank {local_rank}] End-to-end audio training active (unfreeze_audio_layers={args.unfreeze_audio_layers}). Raw waveforms will be passed directly to {args.audio_encoder}.")
         
     if is_ddp_run:
         import torch.distributed as dist

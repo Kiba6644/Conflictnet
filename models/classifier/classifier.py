@@ -107,6 +107,7 @@ class ConflictClassifier(nn.Module):
         type_threshold: float = 0.5,
         dropout: float = 0.1,
         speaker_adaptive_threshold: bool = True,
+        use_skip_highway: bool = True,
     ):
         super().__init__()
         self.n_types = n_types
@@ -114,8 +115,10 @@ class ConflictClassifier(nn.Module):
         self.type_threshold = type_threshold
         self.speaker_adaptive_threshold = speaker_adaptive_threshold
         self.word_div_dim = word_div_dim
+        self.use_skip_highway = use_skip_highway
+        self.embed_dim = embed_dim
 
-        input_dim = embed_dim + word_div_dim
+        input_dim = (embed_dim * 3 if use_skip_highway else embed_dim) + word_div_dim
 
         # Shared feature extractor MLP
         layers = []
@@ -155,6 +158,8 @@ class ConflictClassifier(nn.Module):
         word_div: Optional[torch.Tensor] = None,
         speaker_feat: Optional[torch.Tensor] = None,
         dataset_names: Optional[List[str]] = None,
+        audio_embed: Optional[torch.Tensor] = None,
+        text_embed: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
         """
         Returns: (logits_type, probs_type, severity, conflict_flag)
@@ -163,13 +168,20 @@ class ConflictClassifier(nn.Module):
           - severity:      (B, 1)  or None if severity_head=False
           - conflict_flag: (B,) bool
         """
+        components = [fused_embed]
+        if self.use_skip_highway:
+            B = fused_embed.size(0)
+            t_comp = text_embed if text_embed is not None else torch.zeros(B, self.embed_dim, device=fused_embed.device, dtype=fused_embed.dtype)
+            a_comp = audio_embed if audio_embed is not None else torch.zeros(B, self.embed_dim, device=fused_embed.device, dtype=fused_embed.dtype)
+            components.extend([t_comp, a_comp])
+
         if word_div is not None:
-            x = torch.cat([fused_embed, word_div], dim=-1)
+            components.append(word_div)
         elif self.word_div_dim > 0:
             zeros = torch.zeros(fused_embed.size(0), self.word_div_dim, device=fused_embed.device, dtype=fused_embed.dtype)
-            x = torch.cat([fused_embed, zeros], dim=-1)
-        else:
-            x = fused_embed
+            components.append(zeros)
+
+        x = torch.cat(components, dim=-1)
 
         feat = self.shared_mlp(x)
 
@@ -211,6 +223,13 @@ class ConflictClassifier(nn.Module):
         # Classes 3 (happiness), 4 (neutral), 5 (sadness) are NOT conflict emotions.
         _n_conflict = min(3, probs_type.size(-1))
         _thresh = threshold[:, :_n_conflict] if isinstance(threshold, torch.Tensor) else threshold
-        conflict_flag = (probs_type[:, :_n_conflict] > _thresh).any(dim=-1)  # (B,)
+        
+        is_single_label = dataset_names is not None and any(n in ("meld", "cremad", "iemocap") for n in dataset_names)
+        if is_single_label:
+            # In single-label softmax, check if conflict probability mass exceeds calibrated threshold (0.35)
+            conflict_prob = probs_type[:, :_n_conflict].sum(dim=-1)
+            conflict_flag = conflict_prob > 0.35
+        else:
+            conflict_flag = (probs_type[:, :_n_conflict] > _thresh).any(dim=-1)  # (B,)
 
         return logits_type, probs_type, severity, conflict_flag

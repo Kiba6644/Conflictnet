@@ -11,6 +11,31 @@ from pathlib import Path
 # Allow imports from project root
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import types
+sys.modules.setdefault("speechbrain.integrations.k2_fsa", types.ModuleType("k2_fsa"))
+sys.modules.setdefault("speechbrain.integrations.huggingface.wordemb", types.ModuleType("wordemb"))
+sys.modules.setdefault("speechbrain.integrations.huggingface", types.ModuleType("huggingface"))
+
+import inspect
+try:
+    import speechbrain.utils.importutils as sb_importutils
+    _orig_ensure_module = sb_importutils.LazyModule.ensure_module
+    def _patched_ensure_module(self, stacklevel: int):
+        try:
+            importer_frame = inspect.getframeinfo(sys._getframe(stacklevel + 1))
+            if importer_frame is not None and (
+                importer_frame.filename.endswith("/inspect.py") or importer_frame.filename.endswith("\\inspect.py")
+            ):
+                raise AttributeError()
+        except AttributeError:
+            raise
+        except Exception:
+            pass
+        return _orig_ensure_module(self, stacklevel)
+    sb_importutils.LazyModule.ensure_module = _patched_ensure_module
+except Exception:
+    pass
+
 import unittest.mock
 
 import numpy as np
@@ -72,7 +97,7 @@ class TestAblationFlags:
         assert args.no_cross_attn_injection is False
         assert args.no_speaker_adaptive_threshold is False
         assert args.no_baseline_subtract is False
-        assert args.amp is False
+        assert args.amp is True
         assert args.prosody_stats is None
 
 

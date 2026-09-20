@@ -86,13 +86,17 @@ ConflictNet v2 is an end-to-end multimodal framework designed for detecting affe
    - State cached incrementally in `data/context_cache.py` during inference and training.
 
 7. **Classification & Severity Heads (`models/classifier/classifier.py`)**:
-   - Multi-label subtype head predicting 6 emotion classes or 3 conflict classes.
+   - Multi-label / multiclass subtype head predicting 6 emotion classes or 3 conflict classes.
+   - **Multimodal Skip Highway**: Concatenates `[fused_temporal_embed || text_embed || audio_embed]` directly before the classification head (`in_features = embed_dim * 3`), preserving unimodal cues and mitigating oversmoothing across temporal attention layers.
    - Continuous severity regression head ($[0, 1]$) with Sigmoid activation.
+   - **Calibrated Conflict Flag**: For single-label softmax datasets (e.g. MELD), computes conflict probability mass by summing conflict emotion classes ($\sum_{c \in \{\text{anger, disgust, fear}\}} p_c > 0.35$).
    - Speaker-adaptive threshold network: Computes a learned positive offset $[\tau_{\text{base}}, \tau_{\text{base}} + \Delta]$ from speaker features to prevent expressive speakers from triggering false-positive conflict flags.
 
-8. **Loss Formulation**:
-   - Multi-task loss dynamically weighted using `AutomaticWeightedLoss` (Kendall et al. homoscedastic uncertainty weighting).
-   - InfoNCE contrastive loss aligns audio and text embeddings (with sarcasm samples explicitly masked to prevent forcing contradictory modalities together).
+8. **Loss Formulation & Optimization (`models/alignment/alignment.py`, `models/conflictnet.py`)**:
+   - **Supervised Contrastive (SupCon) Loss**: Vectors audio and text representations; when emotion labels are provided, pulls all intra-batch samples sharing the same emotion class together while pushing apart mismatched classes (with sarcasm pairs masked).
+   - **Active Task Masking**: `MultiTaskLoss` accepts `active_mask` to completely bypass inactive or dummy loss objectives (such as zeroed severity in MELD, or swap loss post-pretraining), eliminating artificial $+2.5$ constant homoscedastic uncertainty penalty floors.
+   - **Classification Priority Boost**: Implements a $1.5\times$ gradient boost on cross-entropy classification to steer early convergence.
+   - **Balanced Class Weights**: Uses smoothed inverse square-root weighting ($[1.5, 3.0, 3.0, 1.2, 0.75, 1.9]$ for MELD) to prevent minority class collapse while maintaining realistic majority class recall.
 
 ---
 
@@ -112,8 +116,8 @@ Preventing conversational and speaker leakage across train/val/test splits is st
 - **Dialogue-Stratified 80/20 Split**:
   - `MELDDataset` in `data/datasets.py` groups samples by `dialogue_id`.
   - The split is executed at the **dialogue level**, ensuring that all turns of a conversation stay in either the train split or the validation split. No dialogue is ever split across sets.
-- **Minority Dialogue Oversampling**:
-  - Because MELD is dominated by Neutral (~59%) and rare classes like Fear represent only ~2.5%, training applies dialogue-level oversampling: conversations containing rare conflict emotions (Anger, Disgust, Fear) are sampled with higher probability during training.
+- **Minority Dialogue Oversampling & Class Weights**:
+  - Because MELD is dominated by Neutral (~59%) and rare classes like Fear represent only ~2.5%, training applies dialogue-level oversampling alongside smoothed inverse square-root loss weights ($[1.5, 3.0, 3.0, 1.2, 0.75, 1.9]$), boosting minority conflict recall while preserving majority neutral precision.
 - **Feature Caching**:
   - Precomputed audio representations are cached into a `.pt` dictionary (`utt_id -> {audio_embed, speaker_embed}`) via `fix_datasets.py` to allow lightning-fast training without disk audio decode bottlenecks.
 

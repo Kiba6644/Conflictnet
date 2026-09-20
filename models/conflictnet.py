@@ -166,29 +166,40 @@ class MultiTaskLoss(nn.Module):
     No manual weighting needed — σ adapts during training.
     """
 
-    def __init__(self, n_tasks: int = 4):
+    def __init__(self, n_tasks: int = 4, classification_weight_boost: float = 1.5):
         super().__init__()
         init = torch.zeros(n_tasks)
         if n_tasks > 2:
             init[2] = 5.0   # severity: e^(-5) ≈ 0.007 weight, effectively disabled
         self.log_vars = nn.Parameter(init)
+        self.classification_weight_boost = classification_weight_boost
 
-    def forward(self, losses: List[torch.Tensor]) -> Tuple[torch.Tensor, Dict[str, float]]:
+    def forward(
+        self,
+        losses: List[torch.Tensor],
+        active_mask: Optional[List[bool]] = None,
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
         # Use log_vars.device as canonical; move each loss to it to avoid
         # device mismatches (fallback tensors may be created on audio.device).
         total = self.log_vars.new_zeros(())  # scalar, same device as parameters
         weights = {}
         for i, loss in enumerate(losses):
-            # Clamp log_vars to prevent exp() overflow in FP16 (>11 overflows float16)
-            log_var_clamped = self.log_vars[i].clamp(min=-8.0, max=10.0)
-            precision = torch.exp(-log_var_clamped)
-            # Always accumulate the log(sigma) regularisation term so log_vars[i]
-            # always receives a gradient. Previously a loss.item()==0.0 early-exit
-            # was skipping this for disabled tasks (e.g. severity), leaving
-            # log_vars[2] frozen at its init value of 5.0 throughout training.
+            weights[f"sigma_task_{i}"] = float(torch.exp(self.log_vars[i] * 0.5).detach().item())
             loss_i = loss.to(self.log_vars.device)
-            total = total + precision * loss_i + 0.5 * log_var_clamped
-            weights[f"sigma_task_{i}"] = torch.exp(self.log_vars[i] * 0.5).detach()
+            # Skip inactive tasks (e.g. missing severity or inactive swap) so their
+            # uncertainty regulariser terms (0.5 * log_var) do not corrupt total loss
+            is_active = (active_mask[i] if active_mask is not None else True) and (loss_i.requires_grad or loss_i.item() > 0)
+            if not is_active:
+                continue
+
+            # Clamp log_vars to prevent exp() overflow in FP16 (>11 overflows float16)
+            log_var_clamped = self.log_vars[i].clamp(min=-6.0, max=6.0)
+            precision = torch.exp(-log_var_clamped)
+
+            # Boost emotion classification task (task index 1) so it drives representation learning
+            task_mult = self.classification_weight_boost if i == 1 else 1.0
+
+            total = total + task_mult * (precision * loss_i + 0.5 * log_var_clamped)
         return total, weights
 
 
@@ -273,8 +284,8 @@ class ConflictNet(nn.Module):
         self.register_buffer("pos_weight", pos_w)
 
         # Multi-class cross-entropy class weights for [anger, disgust, fear, joy, neutral, sadness]
-        # Inverse-frequency based for MELD: Anger ~11%, Disgust ~3%, Fear ~3%, Joy ~17%, Neutral ~59%, Sadness ~7%
-        ce_w = torch.tensor([1.5, 3.5, 3.5, 1.0, 0.4, 2.2])
+        # Inverse square-root based for MELD: preserves Neutral recall without sacrificing minority emotion sensitivity
+        ce_w = torch.tensor([1.5, 3.0, 3.0, 1.2, 0.75, 1.9])
         if n_conflict_types != 6:
             ce_w_padded = torch.full((n_conflict_types,), 1.0)
             ce_w_padded[:min(6, n_conflict_types)] = ce_w[:min(6, n_conflict_types)]
@@ -360,12 +371,13 @@ class ConflictNet(nn.Module):
         self._word_div_warned = False
         word_div_dim = WordLevelDivergence.DIVERGENCE_FEAT_DIM if use_word_divergence else 0
 
-        # 6. Classifier
+        # 6. Classifier (with multimodal skip highway)
         self.classifier = ConflictClassifier(
             embed_dim=embed_dim,
             n_types=n_conflict_types,
             word_div_dim=word_div_dim,
             speaker_adaptive_threshold=use_speaker_adaptive_threshold,
+            use_skip_highway=True,
         )
 
         # 7. Contrastive loss
@@ -377,7 +389,7 @@ class ConflictNet(nn.Module):
         # 9. Multi-task loss balancing
         # Tasks: [contrastive, conflict_type, severity, swap]
         n_tasks = 4 if use_swap_pretraining else 3
-        self.multi_task_loss = MultiTaskLoss(n_tasks=n_tasks)
+        self.multi_task_loss = MultiTaskLoss(n_tasks=n_tasks, classification_weight_boost=1.5)
 
         logger.info(
             f"[ConflictNet] audio={audio_encoder_name} | embed_dim={embed_dim} | "
@@ -667,12 +679,14 @@ class ConflictNet(nn.Module):
             context_pooled = fused_embed
             current_ctx = fused_embed
 
-        # 5. Classify (with speaker-adaptive threshold when speaker_feat available)
+        # 5. Classify (with multimodal skip highway and speaker-adaptive threshold)
         logits_type, probs_type, severity, conflict_flag = self.classifier(
             fused_embed=current_ctx,
             word_div=word_div_feats,
             speaker_feat=speaker_feat,
             dataset_names=dataset_names,
+            audio_embed=audio_embed,
+            text_embed=text_embed,
         )
 
         # 6. Compute losses if labels provided
@@ -681,7 +695,7 @@ class ConflictNet(nn.Module):
         if conflict_type_labels is not None or pretraining:
             losses = []
 
-            # 6a. Contrastive loss
+            # 6a. Supervised Multimodal Contrastive loss (SupCon) / InfoNCE
             # sarcasm_mask used to exclude sarcasm pairs from InfoNCE (they're
             # intentionally audio≠text, so forcing alignment would be wrong).
             # BUG FIX: was conflict_type_labels[:,0] which is the anger slot —
@@ -705,6 +719,7 @@ class ConflictNet(nn.Module):
                 context_pooled=context_pooled,
                 conflict_labels=conflict_binary_labels,
                 sarcasm_mask=sarcasm_mask,
+                emotion_labels=conflict_type_labels,
             )
             losses.append(cl)
 
@@ -786,7 +801,15 @@ class ConflictNet(nn.Module):
                 swap_loss = (audio_embed * 0.0).sum() + sum((p * 0.0).sum() for p in self.swap_objective.parameters())
                 losses.append(swap_loss)
 
-            loss, sigma_weights = self.multi_task_loss(losses)
+            active_mask = [
+                True,  # 0: contrastive
+                conflict_type_labels is not None,  # 1: classification
+                bool(has_real_severity and severity is not None and severity_labels is not None),  # 2: severity
+            ]
+            if self.swap_objective is not None:
+                active_mask.append(bool(pretraining))
+
+            loss, sigma_weights = self.multi_task_loss(losses, active_mask=active_mask)
             loss_breakdown = {
                 "contrastive": losses[0].detach(),
                 "type_bce": losses[1].detach(),
