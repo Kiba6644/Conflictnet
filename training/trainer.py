@@ -305,7 +305,7 @@ class ConflictNetTrainer:
         enc.layer_weights.requires_grad_(True)  # always trains
 
         # Unfreeze last `target` layers
-        unfreeze_from = n_total - target
+        unfreeze_from = max(0, n_total - target)
         for i, layer in enumerate(transformer_layers):
             if i >= unfreeze_from:
                 for p in layer.parameters():
@@ -316,6 +316,31 @@ class ConflictNetTrainer:
                 f"[Progressive Unfreeze] Epoch {epoch}: "
                 f"unfreezing layers {unfreeze_from}-{n_total-1} ({target} layers)"
             )
+
+        # Collect all params currently in optimizer
+        if hasattr(self, "optimizer") and self.optimizer is not None:
+            existing_param_ids = {id(p) for group in self.optimizer.param_groups for p in group["params"]}
+            new_params = [
+                p for layer in transformer_layers[unfreeze_from:]
+                for p in layer.parameters()
+                if p.requires_grad and id(p) not in existing_param_ids
+            ]
+            if hasattr(enc, "layer_weights") and enc.layer_weights is not None:
+                if enc.layer_weights.requires_grad and id(enc.layer_weights) not in existing_param_ids:
+                    new_params.append(enc.layer_weights)
+
+            if new_params:
+                base_lr = self.optimizer.param_groups[0]["lr"] if self.optimizer.param_groups else self.cfg.get("lr", 3e-5)
+                new_lr = base_lr * 0.1
+                self.optimizer.add_param_group({"params": new_params, "lr": new_lr})
+                if hasattr(self, "scheduler") and self.scheduler is not None:
+                    if hasattr(self.scheduler, "base_lrs") and isinstance(self.scheduler.base_lrs, list):
+                        self.scheduler.base_lrs.append(new_lr)
+                    if hasattr(self.scheduler, "lr_lambdas") and isinstance(self.scheduler.lr_lambdas, list):
+                        self.scheduler.lr_lambdas.append(self.scheduler.lr_lambdas[0])
+                logger.info(
+                    f"[ConflictNet] Added {len(new_params)} newly unfrozen audio params to optimizer at lr={new_lr:.2e}"
+                )
 
     def train_epoch(self, epoch: int, pretraining: bool = False) -> Dict[str, float]:
         self.model.train()
@@ -487,7 +512,8 @@ class ConflictNetTrainer:
                 if output.loss_breakdown:
                     for k, v in output.loss_breakdown.items():
                         val = v.item() if isinstance(v, torch.Tensor) else float(v)
-                        if k in ("type_bce", "contrastive", "swap", "severity_mse", "bce_type", "bce_binary", "swap_loss", "severity", "supcon"):
+                        if (k in ("type_bce", "contrastive", "swap", "severity_mse", "bce_type", "bce_binary", "swap_loss", "severity", "supcon", "router_entropy")
+                                or k.startswith("sigma_task_")):
                             clean_k = "ce" if k in ("type_bce", "bce_type") else ("cl" if k == "contrastive" else k)
                             metrics[clean_k] = val
                 self._log(metrics, self.global_step)

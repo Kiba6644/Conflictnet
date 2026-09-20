@@ -121,12 +121,11 @@ class TestEncoders:
     def test_projection_head_normalisation(self):
         """Output is NOT pre-normalised; caller must normalise."""
         from models.alignment import ProjectionHead
-        import torch.nn.functional as F
         head = ProjectionHead(input_dim=64, embed_dim=32)
         x = torch.randn(2, 64)
         out = head(x)
-        normed = F.normalize(out, dim=-1)
-        assert normed.shape == out.shape
+        assert out.shape == (2, 32)
+        assert not torch.allclose(out.norm(dim=-1), torch.ones(2), atol=1e-3), "Output should NOT be pre-normalized"
 
 
 # ---------------------------------------------------------------------------
@@ -258,6 +257,21 @@ class TestContrastiveLoss:
         conflict_labels = torch.tensor([1.0, 0.0, 1.0, 0.0])
         loss = loss_fn(audio, text, conflict_labels=conflict_labels)
         assert loss.item() > 0
+
+    def test_supcon_with_emotion_labels(self):
+        """SupCon branch: same-emotion pairs should be pulled together."""
+        from models.alignment.alignment import ContextGatedContrastiveLoss
+        loss_fn = ContextGatedContrastiveLoss(embed_dim=32)
+        B = 6
+        audio = torch.randn(B, 32)
+        text = torch.randn(B, 32)
+        # Assign 3 pairs of same emotion class (0,1 -> class 0; 2,3 -> class 1; 4,5 -> class 2)
+        emotion_labels = torch.tensor([0, 0, 1, 1, 2, 2])
+        loss = loss_fn(audio, text, emotion_labels=emotion_labels)
+        assert loss.ndim == 0, "Loss should be scalar"
+        assert torch.isfinite(loss), "Loss should be finite"
+        loss.backward()
+        assert any(p.grad is not None for p in loss_fn.parameters()), "Gradients should flow"
 
     def test_cross_modal_attention_shape(self):
         from models.alignment import CrossModalAttention
@@ -521,6 +535,18 @@ class TestMultiTaskLoss:
         from models.conflictnet import MultiTaskLoss
         mtl = MultiTaskLoss(n_tasks=4)
         assert sum(p.numel() for p in mtl.parameters()) == 4
+
+    def test_active_mask_excludes_inactive_tasks(self):
+        """Inactive tasks should not contribute to total loss or shift sigma."""
+        from models.conflictnet import MultiTaskLoss
+        mtl = MultiTaskLoss(n_tasks=3)
+        losses = [torch.tensor(1.0, requires_grad=True),
+                  torch.tensor(2.0, requires_grad=True),
+                  torch.tensor(100.0, requires_grad=True)]  # task 2 is large but inactive
+        total_masked, _ = mtl(losses, active_mask=[True, True, False])
+        total_all, _ = mtl(losses, active_mask=[True, True, True])
+        # With task 2 masked, total should be lower than with all active
+        assert total_masked.item() < total_all.item(), "Inactive task should not contribute to loss"
 
 
 # ---------------------------------------------------------------------------
@@ -828,10 +854,10 @@ class TestFullModelIntegration:
         loss1 = out.loss
         loss1.backward()
         opt.step()
-        opt.zero_grad()
         for name, p in m.named_parameters():
             if p.grad is not None:
                 assert torch.isfinite(p.grad).all(), f"Non-finite gradient in {name}"
+        opt.zero_grad()
         out = m(**batch)
         out.loss.backward()
         opt.step()
