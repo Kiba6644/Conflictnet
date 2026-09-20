@@ -176,14 +176,14 @@ class ConflictNetTrainer:
         #   WavLM backbone layers  → lr × 1/6   ≈ prevents catastrophic forgetting of speech representations
         #   Audio encoder head     → lr × 1/3   ≈ layer_weights + projection head (moderate)
         #   DeBERTa lower layers   → lr × 1/3   ≈ conservative for frozen-base fine-tuning
-        #   DeBERTa LoRA adapters  → lr × 2/3   ≈ LoRA adapters can absorb larger updates
+        #   DeBERTa LoRA adapters  → lr × 3.0   ≈ LoRA adapters need higher capacity/speed to learn emotion nuances
         #   Projection/fusion/temp → lr × 5/3   ≈ freely trainable heads, no forgetting risk
         #   Classifier             → lr × 10/3  ≈ final layer adapts fastest to new task
 
         wavlm_backbone_lr  = lr * (1.0 / 6.0)
         audio_encoder_lr   = lr * (1.0 / 3.0)
         deberta_lower_lr   = lr * (1.0 / 3.0)
-        deberta_lora_lr    = lr * (2.0 / 3.0)
+        deberta_lora_lr    = lr * 3.0  # LoRA adapters need higher capacity/speed to learn emotion nuances before classifier collapses
         head_lr            = lr * (5.0 / 3.0)
         classifier_lr      = lr * (10.0 / 3.0)
 
@@ -670,8 +670,13 @@ class ConflictNetTrainer:
             binary = np.concatenate(all_binary)  # (N,)
 
             # --- Binary conflict F1 / AUC (dataset-agnostic) ---
-            # Max probability across conflict emotion slots (anger, disgust, fear = indices 0,1,2)
-            conflict_prob = probs[:, :3].max(axis=1)
+            # Binary conflict probability: for single-label softmax, sum the probability mass of conflict emotions (anger, disgust, fear).
+            # For multi-label sigmoid, max probability or sum reflects conflict presence.
+            is_single_label_eval = (labels.sum(axis=1) <= 1.0 + 1e-4).all()
+            if is_single_label_eval:
+                conflict_prob = probs[:, :3].sum(axis=1)
+            else:
+                conflict_prob = probs[:, :3].max(axis=1)
             binary_int = binary.astype(int)
 
             # Fixed-threshold binary F1 at 0.5 (reference uncalibrated baseline)

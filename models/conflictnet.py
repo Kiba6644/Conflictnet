@@ -285,9 +285,9 @@ class ConflictNet(nn.Module):
             
         self.register_buffer("pos_weight", pos_w)
 
-        # Multi-class cross-entropy class weights for [anger, disgust, fear, joy, neutral, sadness]
-        # Inverse square-root based for MELD: preserves Neutral recall without sacrificing minority emotion sensitivity
-        ce_w = torch.tensor([1.5, 3.0, 3.0, 1.2, 0.75, 1.9])
+        # Class weights for [anger, disgust, fear, joy, neutral, sadness]
+        # Reduce Neutral to 0.40 and give slight boost to minority conflict classes (anger, disgust, fear) to prevent 100% Neutral collapse
+        ce_w = torch.tensor([1.8, 3.5, 3.5, 1.2, 0.40, 1.8])
         if n_conflict_types != 6:
             ce_w_padded = torch.full((n_conflict_types,), 1.0)
             ce_w_padded[:min(6, n_conflict_types)] = ce_w[:min(6, n_conflict_types)]
