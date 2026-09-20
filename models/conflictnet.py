@@ -250,9 +250,11 @@ class ConflictNet(nn.Module):
         modality_dropout_prob: float = 0.15,
         use_cross_entropy: bool = True,
         use_class_weights: bool = True,
+        contrastive_loss_scale: float = 0.25,
     ):
         super().__init__()
         self.embed_dim = embed_dim
+        self.contrastive_loss_scale = contrastive_loss_scale
         self.use_speaker_norm = use_speaker_norm
         self.use_temporal = use_temporal
         self.use_word_divergence = use_word_divergence
@@ -394,7 +396,8 @@ class ConflictNet(nn.Module):
         logger.info(
             f"[ConflictNet] audio={audio_encoder_name} | embed_dim={embed_dim} | "
             f"speaker_norm={use_speaker_norm} | word_div={use_word_divergence} | "
-            f"temporal={temporal_n_layers}L×{temporal_n_heads}H"
+            f"temporal={temporal_n_layers}L×{temporal_n_heads}H | "
+            f"contrastive_loss_scale={contrastive_loss_scale}"
         )
 
     # ------------------------------------------------------------------
@@ -721,6 +724,7 @@ class ConflictNet(nn.Module):
                 sarcasm_mask=sarcasm_mask,
                 emotion_labels=conflict_type_labels,
             )
+            cl = cl * self.contrastive_loss_scale
             losses.append(cl)
 
             # 6b. Classification loss for conflict types

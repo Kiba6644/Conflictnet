@@ -41,6 +41,7 @@ class ExperimentConfig:
     early_stop_patience: int = 10
     seed: int = 42
     amp: bool = True
+    contrastive_loss_scale: float = 0.25
 
     # ── Ablation toggles ────────────────────────────────────────────────
     use_speaker_norm: bool = True
@@ -138,6 +139,8 @@ class ExperimentConfig:
                 out[field_name] = val
         out["amp"] = self.amp
         out["no_amp"] = not self.amp
+        # "--contrastive_loss_scale", str(self.contrastive_loss_scale),
+        out["contrastive_loss_scale"] = self.contrastive_loss_scale
         return out
 
     def __post_init__(self):

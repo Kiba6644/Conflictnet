@@ -165,6 +165,8 @@ def parse_args(argv=None):
                    help="Probability of dropping either audio or text modality during training (default: 0.15)")
     p.add_argument("--no_class_weights", action="store_true",
                    help="Disable inverse-frequency class weighting for multi-class cross-entropy loss")
+    p.add_argument("--contrastive_loss_scale", type=float, default=None,
+                   help="Scale factor for contrastive loss before MultiTaskLoss (default: 0.25)")
     return p.parse_args(argv)
 
 
@@ -229,6 +231,10 @@ def main(args=None):
     # initialise a Hugging Face tokenizer, so starting the model warm-up later is
     # too late to protect a fresh cache from concurrent torchrun workers.
     from models.conflictnet import ConflictNet
+    from models.experiment_config import ExperimentConfig
+
+    exp_config = ExperimentConfig.from_args(args)
+    cfg = exp_config.to_dict()
 
     if (getattr(args, "pt_dir", None) or os.environ.get("CONFLICTNET_PT_DIR")) and args.audio_encoder != "precomputed":
         if args.unfreeze_audio_layers > 0:
@@ -243,6 +249,7 @@ def main(args=None):
             args.audio_encoder = "precomputed"
 
     def _build_model():
+        contrastive_scale = args.contrastive_loss_scale or cfg.get("contrastive_loss_scale", 0.25)
         return ConflictNet(
             audio_encoder_name=args.audio_encoder,
             embed_dim=args.embed_dim,
@@ -261,6 +268,7 @@ def main(args=None):
             router_entropy_reg=args.router_entropy_reg,
             modality_dropout_prob=args.modality_dropout,
             use_class_weights=not args.no_class_weights,
+            contrastive_loss_scale=contrastive_scale,
         )
 
     is_ddp_run = local_rank != -1
@@ -720,6 +728,7 @@ def train_conflictnet(
     iemocap_root: Optional[str] = None,
     mustard_root: Optional[str] = None,
     cremad_root: Optional[str] = None,
+    contrastive_loss_scale: Optional[float] = None,
     **kwargs,
 ):
     """Python function interface to train ConflictNet without CLI flags.
@@ -746,6 +755,8 @@ def train_conflictnet(
         argv.extend(["--mustard_root", str(mustard_root)])
     if cremad_root:
         argv.extend(["--cremad_root", str(cremad_root)])
+    if contrastive_loss_scale is not None:
+        argv.extend(["--contrastive_loss_scale", str(contrastive_loss_scale)])
     argv.extend(["--output_dir", str(output_dir)])
     argv.extend(["--batch_size", str(batch_size)])
     argv.extend(["--epochs", str(epochs)])
