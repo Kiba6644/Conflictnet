@@ -58,20 +58,26 @@ def focal_cross_entropy_loss(
 ) -> torch.Tensor:
     """Multi-class Focal Cross-Entropy loss for single-label classification.
 
-    Dynamically down-weights easy majority-class (Neutral) predictions
-    so the model focuses gradient budget on hard minority emotions.
-    gamma=2.0 is standard; label_smoothing applied before focal weighting.
+    Dynamically down-weights easy majority-class (Neutral) predictions so the model
+    focuses gradient budget on hard minority emotions. gamma=2.0 is standard.
+    p_t is computed from UNWEIGHTED CE so class weights don't distort focal weighting.
     """
-    # Standard CE (with label smoothing and class weights if provided)
-    ce_loss = F.cross_entropy(
-        logits, targets, weight=weight, label_smoothing=label_smoothing, reduction="none"
+    # Compute unweighted CE for correct p_t (focal weight must be based on raw probability)
+    ce_unweighted = F.cross_entropy(
+        logits, targets, label_smoothing=label_smoothing, reduction="none"
     )
-    # Probability of the correct class (for focal weighting)
     with torch.no_grad():
-        p_t = torch.exp(-ce_loss)  # p_t = exp(-CE) = softmax[target]
-    # Focal weight: (1 - p_t)^gamma
+        p_t = torch.exp(-ce_unweighted)  # p_t = softmax[target_class], unaffected by class weights
     focal_weight = (1.0 - p_t) ** gamma
-    return (focal_weight * ce_loss).mean()
+
+    # Apply class weights to the actual loss for frequency correction (separate from focal weighting)
+    if weight is not None:
+        ce_weighted = F.cross_entropy(
+            logits, targets, weight=weight, label_smoothing=label_smoothing, reduction="none"
+        )
+    else:
+        ce_weighted = ce_unweighted
+    return (focal_weight * ce_weighted).mean()
 
 # ---------------------------------------------------------------------------
 # Output container
@@ -310,9 +316,9 @@ class ConflictNet(nn.Module):
         self.register_buffer("pos_weight", pos_w)
 
         # Class weights for [anger, disgust, fear, joy, neutral, sadness]
-        # Moderate weighting — focal loss (gamma=2.0) handles easy-Neutral suppression dynamically;
-        # static weights just correct for dataset frequency, not over-penalize.
-        ce_w = torch.tensor([1.5, 2.5, 2.5, 1.0, 0.65, 1.5])
+        # Mild frequency correction only — focal loss (gamma=2.0) handles dynamic suppression of easy Neutral.
+        # Do NOT aggressively penalize Neutral; it is 47% of MELD and must remain predictable.
+        ce_w = torch.tensor([1.4, 2.0, 2.0, 0.9, 0.80, 1.3])
         if n_conflict_types != 6:
             ce_w_padded = torch.full((n_conflict_types,), 1.0)
             ce_w_padded[:min(6, n_conflict_types)] = ce_w[:min(6, n_conflict_types)]

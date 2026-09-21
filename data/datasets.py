@@ -777,7 +777,14 @@ class MELDDataset(Dataset):
         logger.info(f"[MELD] {split}: {len(self.items)} utterances")
         logger.info(f"[MELD] Pre-tokenizing {len(self.items)} utterances...")
         for item in self.items:
-            ids, mask = tokenize(item["text"], self.tokenizer)
+            # Prepend speaker name for MELD — SOTA (EmoBERTa) shows +2-3pp F1 gain from speaker attribution
+            speaker = (item.get("speaker") or "").strip()
+            text_for_tokenization = (
+                f"{speaker}: {item['text']}"
+                if speaker and speaker.lower() != "unknown"
+                else item["text"]
+            )
+            ids, mask = tokenize(text_for_tokenization, self.tokenizer)
             item["input_ids"] = ids
             item["attention_mask"] = mask
             if getattr(self, "textgrid_root", None) is not None:
@@ -907,6 +914,7 @@ class MELDDataset(Dataset):
                 items.append({
                     "wav_path": str(wav_path),
                     "text": text,
+                    "speaker": speaker,
                     "emotion": emotion,
                     "dialogue_id": dia_id,
                     "utterance_id": utt_id,
