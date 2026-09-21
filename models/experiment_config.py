@@ -33,15 +33,16 @@ class ExperimentConfig:
 
     # ── Training hyper-parameters ───────────────────────────────────────
     epochs: int = 30
-    pretrain_epochs: int = 5
+    pretrain_epochs: int = 1
     batch_size: int = 16
     lr: float = 2e-5
-    warmup_steps: int = 500
+    warmup_steps: int = 300
     gradient_accumulation_steps: int = 1
     early_stop_patience: int = 10
     seed: int = 42
     amp: bool = True
     contrastive_loss_scale: float = 0.25
+    label_smoothing: float = 0.10
 
     # ── Ablation toggles ────────────────────────────────────────────────
     use_speaker_norm: bool = True
@@ -52,7 +53,7 @@ class ExperimentConfig:
     use_word_divergence: bool = True
     use_adaptive_router: bool = False
     router_entropy_reg: float = 0.01
-    modality_dropout: float = 0.15
+    modality_dropout: float = 0.05
     use_cross_entropy: bool = True
     use_class_weights: bool = True
 

@@ -176,14 +176,14 @@ class ConflictNetTrainer:
         #   WavLM backbone layers  → lr × 1/6   ≈ prevents catastrophic forgetting of speech representations
         #   Audio encoder head     → lr × 1/3   ≈ layer_weights + projection head (moderate)
         #   DeBERTa lower layers   → lr × 1/3   ≈ conservative for frozen-base fine-tuning
-        #   DeBERTa LoRA adapters  → lr × 3.0   ≈ LoRA adapters need higher capacity/speed to learn emotion nuances
+        #   DeBERTa LoRA adapters  → lr × 7.0   ≈ LoRA adapters need higher LR (~1.4e-4 with base 2e-5; SOTA 1e-4..2e-4)
         #   Projection/fusion/temp → lr × 5/3   ≈ freely trainable heads, no forgetting risk
         #   Classifier             → lr × 10/3  ≈ final layer adapts fastest to new task
 
         wavlm_backbone_lr  = lr * (1.0 / 6.0)
         audio_encoder_lr   = lr * (1.0 / 3.0)
         deberta_lower_lr   = lr * (1.0 / 3.0)
-        deberta_lora_lr    = lr * 3.0  # LoRA adapters need higher capacity/speed to learn emotion nuances before classifier collapses
+        deberta_lora_lr = lr * 7.0  # LoRA adapters need LR ~1.4e-4 (7x base 2e-5); SOTA: 1e-4 to 2e-4 for DeBERTa-large LoRA
         head_lr            = lr * (5.0 / 3.0)
         classifier_lr      = lr * (10.0 / 3.0)
 

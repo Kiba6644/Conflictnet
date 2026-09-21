@@ -898,9 +898,8 @@ class MELDDataset(Dataset):
                 elif emotion == "joy":
                     type_labels[EMOTION_IDX_HAPPINESS] = 1
                 elif emotion == "surprise":
-                    # Map surprise to neutral slot is least-bad option given 6-class schema.
-                    # Surprise in MELD is mostly negative/shocked, closer to neutral than joy.
-                    type_labels[EMOTION_IDX_NEUTRAL] = 1
+                    # Remap surprise to joy/happiness slot (same positive/exclamatory valence, avoids corrupting neutral)
+                    type_labels[EMOTION_IDX_HAPPINESS] = 1
                 elif emotion == "sadness":
                     type_labels[EMOTION_IDX_SADNESS] = 1
                 else:  # neutral

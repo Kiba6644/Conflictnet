@@ -116,9 +116,9 @@ def parse_args(argv=None):
     p.add_argument("--no_amp", action="store_true",
                    help="Disable automatic mixed precision (fp16/bf16) training")
     p.add_argument("--compile", action="store_true", help="Enable torch.compile (overrides config)")
-    p.add_argument("--pretrain_epochs", type=int, default=5)
+    p.add_argument("--pretrain_epochs", type=int, default=1)
     p.add_argument("--lr", type=float, default=2e-5)
-    p.add_argument("--warmup_steps", type=int, default=150)
+    p.add_argument("--warmup_steps", type=int, default=300)
     p.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--no_speaker_norm", action="store_true")
     p.add_argument("--no_temporal", action="store_true",
@@ -149,7 +149,7 @@ def parse_args(argv=None):
                    help="Max times to continue training if below target_f1")
     p.add_argument("--resume_epochs", type=int, default=10,
                    help="Additional epochs per retry")
-    p.add_argument("--label_smoothing", type=float, default=0.0,
+    p.add_argument("--label_smoothing", type=float, default=0.10,
                    help="Label smoothing epsilon for conflict type BCE loss (0 = disabled)")
     p.add_argument("--use_adaptive_router", action="store_true",
                    help="Enable learned modality router alpha gate (text vs audio weighting)")
@@ -161,8 +161,8 @@ def parse_args(argv=None):
                    help="DataLoader worker processes. Default 0 (single process). Set >0 if running in an environment with sufficient shared memory.")
     p.add_argument("--pt_dir", type=str, default=None,
                    help="Path to precomputed features directory (sets CONFLICTNET_PT_DIR automatically)")
-    p.add_argument("--modality_dropout", type=float, default=0.15,
-                   help="Probability of dropping either audio or text modality during training (default: 0.15)")
+    p.add_argument("--modality_dropout", type=float, default=0.05,
+                   help="Probability of dropping either audio or text modality during training (default: 0.05)")
     p.add_argument("--no_class_weights", action="store_true",
                    help="Disable inverse-frequency class weighting for multi-class cross-entropy loss")
     p.add_argument("--contrastive_loss_scale", type=float, default=None,

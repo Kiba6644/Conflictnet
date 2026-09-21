@@ -49,6 +49,30 @@ def focal_bce_loss(logits, targets, alpha=0.75, gamma=2.0, pos_weight=None):
                                    torch.full_like(targets, 1 - alpha))
     return (alpha_weight * focal_weight * bce).mean()
 
+def focal_cross_entropy_loss(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    weight: Optional[torch.Tensor] = None,
+    gamma: float = 2.0,
+    label_smoothing: float = 0.0,
+) -> torch.Tensor:
+    """Multi-class Focal Cross-Entropy loss for single-label classification.
+
+    Dynamically down-weights easy majority-class (Neutral) predictions
+    so the model focuses gradient budget on hard minority emotions.
+    gamma=2.0 is standard; label_smoothing applied before focal weighting.
+    """
+    # Standard CE (with label smoothing and class weights if provided)
+    ce_loss = F.cross_entropy(
+        logits, targets, weight=weight, label_smoothing=label_smoothing, reduction="none"
+    )
+    # Probability of the correct class (for focal weighting)
+    with torch.no_grad():
+        p_t = torch.exp(-ce_loss)  # p_t = exp(-CE) = softmax[target]
+    # Focal weight: (1 - p_t)^gamma
+    focal_weight = (1.0 - p_t) ** gamma
+    return (focal_weight * ce_loss).mean()
+
 # ---------------------------------------------------------------------------
 # Output container
 # ---------------------------------------------------------------------------
@@ -286,8 +310,9 @@ class ConflictNet(nn.Module):
         self.register_buffer("pos_weight", pos_w)
 
         # Class weights for [anger, disgust, fear, joy, neutral, sadness]
-        # Reduce Neutral to 0.40 and give slight boost to minority conflict classes (anger, disgust, fear) to prevent 100% Neutral collapse
-        ce_w = torch.tensor([1.8, 3.5, 3.5, 1.2, 0.40, 1.8])
+        # Moderate weighting — focal loss (gamma=2.0) handles easy-Neutral suppression dynamically;
+        # static weights just correct for dataset frequency, not over-penalize.
+        ce_w = torch.tensor([1.5, 2.5, 2.5, 1.0, 0.65, 1.5])
         if n_conflict_types != 6:
             ce_w_padded = torch.full((n_conflict_types,), 1.0)
             ce_w_padded[:min(6, n_conflict_types)] = ce_w[:min(6, n_conflict_types)]
@@ -741,10 +766,11 @@ class ConflictNet(nn.Module):
                 if is_single_label_batch and self.use_cross_entropy:
                     target_cls = conflict_type_labels.argmax(dim=-1)
                     weights = self.class_weights if self.use_class_weights else None
-                    type_loss = nn.functional.cross_entropy(
+                    type_loss = focal_cross_entropy_loss(
                         logits_type,
                         target_cls,
                         weight=weights,
+                        gamma=2.0,
                         label_smoothing=self.label_smoothing,
                     )
                     losses.append(type_loss)
@@ -755,10 +781,11 @@ class ConflictNet(nn.Module):
                         dtype=torch.bool,
                     )
                     weights = self.class_weights if self.use_class_weights else None
-                    ce_loss = nn.functional.cross_entropy(
+                    ce_loss = focal_cross_entropy_loss(
                         logits_type[sl_mask],
                         conflict_type_labels[sl_mask].argmax(dim=-1),
                         weight=weights,
+                        gamma=2.0,
                         label_smoothing=self.label_smoothing,
                     )
                     ml_mask = ~sl_mask
