@@ -60,24 +60,19 @@ def focal_cross_entropy_loss(
 
     Dynamically down-weights easy majority-class (Neutral) predictions so the model
     focuses gradient budget on hard minority emotions. gamma=2.0 is standard.
-    p_t is computed from UNWEIGHTED CE so class weights don't distort focal weighting.
+    p_t is computed directly from raw softmax probabilities (unaffected by label smoothing).
     """
-    # Compute unweighted CE for correct p_t (focal weight must be based on raw probability)
-    ce_unweighted = F.cross_entropy(
-        logits, targets, label_smoothing=label_smoothing, reduction="none"
-    )
+    # Raw target class probability for focal weighting
     with torch.no_grad():
-        p_t = torch.exp(-ce_unweighted)  # p_t = softmax[target_class], unaffected by class weights
+        probs = torch.softmax(logits.float(), dim=-1)
+        p_t = probs.gather(1, targets.unsqueeze(1)).squeeze(1)
     focal_weight = (1.0 - p_t) ** gamma
 
-    # Apply class weights to the actual loss for frequency correction (separate from focal weighting)
-    if weight is not None:
-        ce_weighted = F.cross_entropy(
-            logits, targets, weight=weight, label_smoothing=label_smoothing, reduction="none"
-        )
-    else:
-        ce_weighted = ce_unweighted
-    return (focal_weight * ce_weighted).mean()
+    # Apply class weights to CE loss for frequency correction
+    ce_loss = F.cross_entropy(
+        logits, targets, weight=weight, label_smoothing=label_smoothing, reduction="none"
+    )
+    return (focal_weight * ce_loss).mean()
 
 # ---------------------------------------------------------------------------
 # Output container

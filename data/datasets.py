@@ -408,6 +408,7 @@ class IEMOCAPDataset(Dataset):
             "turn_index": item.get("turn_index", 0),
             "word_timestamps": word_timestamps,
             "token_word_boundaries": token_word_boundaries,
+            "dataset_name": "iemocap",
         }
 
 
@@ -740,6 +741,7 @@ class CREMADDataset(Dataset):
             "turn_index": 0,
             "word_timestamps": word_timestamps,
             "token_word_boundaries": token_word_boundaries,
+            "dataset_name": "cremad",
         }
 
 
@@ -788,7 +790,7 @@ class MELDDataset(Dataset):
             item["input_ids"] = ids
             item["attention_mask"] = mask
             if getattr(self, "textgrid_root", None) is not None:
-                item["token_word_boundaries"] = compute_token_word_boundaries(item["text"], self.tokenizer)
+                item["token_word_boundaries"] = compute_token_word_boundaries(text_for_tokenization, self.tokenizer)
             else:
                 item["token_word_boundaries"] = None
         self.tokenizer = None
@@ -1050,7 +1052,7 @@ class MELDDataset(Dataset):
             for diag_items in minority_dialogues:
                 for item in diag_items:
                     tagged = dict(item)
-                    orig_cid = item.get("conversation_id", item.get("dialogue_id", "unk"))
+                    orig_cid = item.get("conversation_id", f"meld_{self.split}_{item.get('dialogue_id', 'unk')}")
                     tagged["conversation_id"] = f"{orig_cid}_aug{copy_idx}"
                     extra.append(tagged)
 
@@ -1094,7 +1096,7 @@ class MELDDataset(Dataset):
             "gender": item["gender"],
             "text": item["text"],
             "utterance_id": Path(item["wav_path"]).stem,
-            "conversation_id": f"meld_{self.split}_{item['dialogue_id']}",
+            "conversation_id": item.get("conversation_id", f"meld_{self.split}_{item['dialogue_id']}"),
             "turn_index": item.get("turn_index", 0),
             "word_timestamps": word_timestamps,
             "token_word_boundaries": token_word_boundaries,
@@ -1254,6 +1256,7 @@ class CMUMOSEIDataset(Dataset):
             "turn_index": int(Path(item['wav_path']).stem.split('_')[1]) if '_' in Path(item['wav_path']).stem and Path(item['wav_path']).stem.split('_')[1].isdigit() else 0,
             "word_timestamps": word_timestamps,
             "token_word_boundaries": token_word_boundaries,
+            "dataset_name": "mosei",
         }
 
 
@@ -1413,6 +1416,7 @@ class CASEDataset(Dataset):
             "turn_index": 0,
             "word_timestamps": word_timestamps,
             "token_word_boundaries": token_word_boundaries,
+            "dataset_name": "case",
         }
 
 
@@ -1485,6 +1489,7 @@ class GoEmotionsDataset(Dataset):
             # so the context cache never accumulates cross-sample history.
             "conversation_id": f"goemotions_{idx}",
             "turn_index": 0,
+            "dataset_name": "goemotions",
         }
 
 

@@ -179,9 +179,29 @@ class CrossModalAttention(nn.Module):
             )
             t_seq = self.text_layers[i]['norm'](t_seq + drop_path(t_mod, 0.1, self.training))
         
-        # Mean pooling to return (B, D)
-        audio_out = a_seq.mean(dim=1) if audio_seq is not None else a_seq.squeeze(1)
-        text_out = t_seq.mean(dim=1) if text_seq is not None else t_seq.squeeze(1)
+        # Masked average pooling to prevent padding tokens from diluting representations
+        if text_seq is not None and text_attention_mask is not None:
+            t_mask = text_attention_mask.unsqueeze(-1).float()
+            text_out = (t_seq * t_mask).sum(dim=1) / t_mask.sum(dim=1).clamp(min=1e-9)
+        elif text_seq is not None:
+            text_out = t_seq.mean(dim=1)
+        else:
+            text_out = t_seq.squeeze(1)
+
+        if audio_seq is not None and audio_attention_mask is not None:
+            # Handle audio mask shape: sample-level vs frame-level
+            if audio_attention_mask.size(1) == a_seq.size(1):
+                a_mask = audio_attention_mask.unsqueeze(-1).float()
+            else:
+                # Interpolate / downsample waveform mask to match frame count
+                a_mask = torch.nn.functional.adaptive_max_pool1d(
+                    audio_attention_mask.unsqueeze(1).float(), a_seq.size(1)
+                ).squeeze(1).unsqueeze(-1)
+            audio_out = (a_seq * a_mask).sum(dim=1) / a_mask.sum(dim=1).clamp(min=1e-9)
+        elif audio_seq is not None:
+            audio_out = a_seq.mean(dim=1)
+        else:
+            audio_out = a_seq.squeeze(1)
         
         return audio_out, text_out
 

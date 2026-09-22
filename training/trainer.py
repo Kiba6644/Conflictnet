@@ -183,7 +183,7 @@ class ConflictNetTrainer:
         wavlm_backbone_lr  = lr * (1.0 / 6.0)
         audio_encoder_lr   = lr * (1.0 / 3.0)
         deberta_lower_lr   = lr * (1.0 / 3.0)
-        deberta_lora_lr = lr * 7.0  # LoRA adapters need LR ~1.4e-4 (7x base 2e-5); SOTA: 1e-4 to 2e-4 for DeBERTa-large LoRA
+        deberta_lora_lr = min(lr * 3.0, 1.2e-4)  # Safe cap for DeBERTa-v3-large LoRA to prevent divergence
         head_lr            = lr * (5.0 / 3.0)
         classifier_lr      = lr * (10.0 / 3.0)
 
@@ -559,6 +559,7 @@ class ConflictNetTrainer:
             "val/f1_macro_cal",
             "val/f1_weighted_cal",
             "val/class_thresh",
+            "val/f1_binary_raw05",
         ])
         
         self.model.eval()
