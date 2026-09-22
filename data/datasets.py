@@ -162,18 +162,24 @@ def tokenize(
 
 def compute_token_word_boundaries(
     text: str,
-    tokenizer: AutoTokenizer,
+    tokenizer: Any,
     max_len: int = MAX_TEXT_LEN,
+    char_offset: int = 0,
+    transcript_text: Optional[str] = None,
 ) -> List[Tuple[int, int]]:
-    """Map each word in text to its token span [token_start, token_end).
+    """Align word boundaries to token positions.
 
     Uses tokenizer ``return_offsets_mapping`` to align character-level
     word boundaries to token positions. Excludes special tokens (CLS, SEP).
+    If transcript_text and char_offset are provided, word spans are extracted
+    from transcript_text and offset into text (useful when a speaker prefix is prepended).
 
     Args:
-        text: The utterance text.
+        text: The utterance text (or text with speaker prefix).
         tokenizer: HuggingFace tokenizer instance.
         max_len: Max token length (same as ``tokenize()``).
+        char_offset: Character offset of the spoken text inside text.
+        transcript_text: Spoken utterance text without prefix.
 
     Returns:
         List of ``(token_start_idx, token_end_idx)`` per word.
@@ -197,8 +203,9 @@ def compute_token_word_boundaries(
         return []
 
     word_spans = []
-    for m in _re.finditer(r'\S+', text):
-        ws, we = m.start(), m.end()
+    target = transcript_text if transcript_text is not None else text
+    for m in _re.finditer(r'\S+', target):
+        ws, we = m.start() + char_offset, m.end() + char_offset
         if we > ws:
             word_spans.append((ws, we))
 
@@ -207,7 +214,7 @@ def compute_token_word_boundaries(
         token_start = None
         token_end = None
         for idx, cs, ce in token_chars:
-            if cs >= ws and cs < we:
+            if cs < we and ce > ws:
                 if token_start is None:
                     token_start = idx
                 token_end = idx + 1
@@ -351,8 +358,8 @@ class IEMOCAPDataset(Dataset):
                             "conflict_binary": int(conflict),
                             "conflict_type_labels": type_labels,
                             "severity": float(conflict),  # binary proxy; no real severity annotation in IEMOCAP
-                        "speaker_id": utt_id[:6],  # e.g. 'Ses01F' — session+gender uniquely identifies speaker
-                        "gender": "F" if utt_id[5] == "F" else "M",
+                            "speaker_id": f"{utt_id[:5]}{utt_id.split('_')[-1][0]}" if "_" in utt_id else utt_id[:6],
+                            "gender": utt_id.split('_')[-1][0] if ("_" in utt_id and utt_id.split('_')[-1][0] in ("F", "M")) else ("F" if utt_id[5] == "F" else "M"),
                             "conversation_id": conv_id,
                             "turn_index": turn_idx,
                         })
@@ -781,16 +788,23 @@ class MELDDataset(Dataset):
         for item in self.items:
             # Prepend speaker name for MELD — SOTA (EmoBERTa) shows +2-3pp F1 gain from speaker attribution
             speaker = (item.get("speaker") or "").strip()
-            text_for_tokenization = (
-                f"{speaker}: {item['text']}"
-                if speaker and speaker.lower() != "unknown"
-                else item["text"]
-            )
+            if speaker and speaker.lower() != "unknown":
+                prefix = f"{speaker}: "
+                text_for_tokenization = f"{prefix}{item['text']}"
+                char_offset = len(prefix)
+            else:
+                text_for_tokenization = item["text"]
+                char_offset = 0
             ids, mask = tokenize(text_for_tokenization, self.tokenizer)
             item["input_ids"] = ids
             item["attention_mask"] = mask
             if getattr(self, "textgrid_root", None) is not None:
-                item["token_word_boundaries"] = compute_token_word_boundaries(text_for_tokenization, self.tokenizer)
+                item["token_word_boundaries"] = compute_token_word_boundaries(
+                    text_for_tokenization,
+                    self.tokenizer,
+                    char_offset=char_offset,
+                    transcript_text=item["text"],
+                )
             else:
                 item["token_word_boundaries"] = None
         self.tokenizer = None

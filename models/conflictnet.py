@@ -65,14 +65,23 @@ def focal_cross_entropy_loss(
     # Raw target class probability for focal weighting
     with torch.no_grad():
         probs = torch.softmax(logits.float(), dim=-1)
-        p_t = probs.gather(1, targets.unsqueeze(1)).squeeze(1)
+        if targets.dim() == 1:
+            p_t = probs.gather(1, targets.unsqueeze(1)).squeeze(1)
+        else:
+            p_t = (probs * targets).sum(dim=-1)
     focal_weight = (1.0 - p_t) ** gamma
 
     # Apply class weights to CE loss for frequency correction
     ce_loss = F.cross_entropy(
         logits, targets, weight=weight, label_smoothing=label_smoothing, reduction="none"
     )
-    return (focal_weight * ce_loss).mean()
+    if weight is not None:
+        target_indices = targets if targets.dim() == 1 else targets.argmax(dim=-1)
+        sample_weights = weight[target_indices]
+        norm = (focal_weight * sample_weights).sum().clamp(min=1e-6)
+    else:
+        norm = focal_weight.sum().clamp(min=1e-6)
+    return (focal_weight * ce_loss).sum() / norm
 
 # ---------------------------------------------------------------------------
 # Output container
@@ -224,7 +233,9 @@ class MultiTaskLoss(nn.Module):
             # Boost emotion classification task (task index 1) so it drives representation learning
             task_mult = self.classification_weight_boost if i == 1 else 1.0
 
-            total = total + task_mult * (precision * loss_i + 0.5 * log_var_clamped)
+            # Kendall uncertainty: continuous regression tasks (index 2: severity MSE) have a 0.5 factor on precision * loss
+            prec_factor = 0.5 if i == 2 else 1.0
+            total = total + (task_mult * prec_factor * precision * loss_i + 0.5 * log_var_clamped)
         return total, weights
 
 
@@ -521,7 +532,8 @@ class ConflictNet(nn.Module):
         text_embed: torch.Tensor,
         speaker_feat: torch.Tensor,
         word_div_feats: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        return_modality_embeds: bool = False,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]] | Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor, torch.Tensor]:
         """Fuse audio, text, speaker embeddings via gated MLP or MoE.
 
         When ``self.modality_router`` is enabled, a learned scalar α ∈ [0,1]
@@ -547,8 +559,9 @@ class ConflictNet(nn.Module):
             p = self.modality_dropout_prob
             audio_mask = (r >= p).float()
             text_mask = ((r < p) | (r >= 2 * p)).float()
-            audio_embed = audio_embed * audio_mask
-            text_embed = text_embed * text_mask
+            keep_p = max(1.0 - p, 1e-4)
+            audio_embed = (audio_embed * audio_mask) / keep_p
+            text_embed = (text_embed * text_mask) / keep_p
 
         if self.use_speaker_norm:
             combined = torch.cat([audio_embed, text_embed, speaker_feat], dim=-1)
@@ -564,9 +577,13 @@ class ConflictNet(nn.Module):
                     word_div_feats = torch.zeros(audio_embed.size(0), 11, device=audio_embed.device)
                 gate_feats.append(word_div_feats)
             gate_feat_tensor = torch.cat(gate_feats, dim=-1)
-            return self.fusion_gate(combined, gate_feat_tensor), alpha
+            fused = self.fusion_gate(combined, gate_feat_tensor)
         else:
-            return self.fusion_gate(combined), alpha  # (B, embed_dim), alpha
+            fused = self.fusion_gate(combined)
+
+        if return_modality_embeds:
+            return fused, alpha, audio_embed, text_embed
+        return fused, alpha  # (B, embed_dim), alpha
 
     # ------------------------------------------------------------------
     # Full forward pass
@@ -656,7 +673,9 @@ class ConflictNet(nn.Module):
             self._word_div_warned = True
 
         # 4. Fuse current turn
-        fused_embed, router_alpha = self.fuse(audio_embed, text_embed, speaker_feat, word_div_feats)  # (B, D)
+        fused_embed, router_alpha, audio_embed_reg, text_embed_reg = self.fuse(
+            audio_embed, text_embed, speaker_feat, word_div_feats, return_modality_embeds=True
+        )  # (B, D)
 
         # 5. Temporal context (optional — skip if disabled for ablation)
         if self.temporal is not None:
@@ -714,8 +733,8 @@ class ConflictNet(nn.Module):
             word_div=word_div_feats,
             speaker_feat=speaker_feat,
             dataset_names=dataset_names,
-            audio_embed=audio_embed,
-            text_embed=text_embed,
+            audio_embed=audio_embed_reg,
+            text_embed=text_embed_reg,
         )
 
         # 6. Compute losses if labels provided
@@ -782,24 +801,29 @@ class ConflictNet(nn.Module):
                         dtype=torch.bool,
                     )
                     weights = self.class_weights if self.use_class_weights else None
-                    ce_loss = focal_cross_entropy_loss(
-                        logits_type[sl_mask],
-                        conflict_type_labels[sl_mask].argmax(dim=-1),
-                        weight=weights,
-                        gamma=2.0,
-                        label_smoothing=self.label_smoothing,
-                    )
+                    total_type_loss = torch.tensor(0.0, device=logits_type.device)
+                    if sl_mask.any():
+                        ce_loss = focal_cross_entropy_loss(
+                            logits_type[sl_mask],
+                            conflict_type_labels[sl_mask].argmax(dim=-1),
+                            weight=weights,
+                            gamma=2.0,
+                            label_smoothing=self.label_smoothing,
+                        )
+                        total_type_loss = total_type_loss + ce_loss * sl_mask.sum()
                     ml_mask = ~sl_mask
-                    eps = self.label_smoothing
-                    smooth_labels = conflict_type_labels[ml_mask].float().clamp(eps, 1.0 - eps)
-                    bce_loss = focal_bce_loss(
-                        logits_type[ml_mask],
-                        smooth_labels,
-                        alpha=0.75,
-                        gamma=2.0,
-                        pos_weight=self.pos_weight,
-                    )
-                    losses.append((ce_loss * sl_mask.sum() + bce_loss * ml_mask.sum()) / logits_type.size(0))
+                    if ml_mask.any():
+                        eps = self.label_smoothing
+                        smooth_labels = conflict_type_labels[ml_mask].float().clamp(eps, 1.0 - eps)
+                        bce_loss = focal_bce_loss(
+                            logits_type[ml_mask],
+                            smooth_labels,
+                            alpha=0.75,
+                            gamma=2.0,
+                            pos_weight=self.pos_weight,
+                        )
+                        total_type_loss = total_type_loss + bce_loss * ml_mask.sum()
+                    losses.append(total_type_loss / logits_type.size(0))
                 else:
                     eps = self.label_smoothing
                     smooth_labels = conflict_type_labels.float().clamp(eps, 1.0 - eps)

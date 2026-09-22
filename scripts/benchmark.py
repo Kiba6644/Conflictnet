@@ -323,7 +323,7 @@ def main():
     }
 
     for r in dataset_results:
-        ds_name = r.pop("dataset")
+        ds_name = r["dataset"]
         # Strip raw prediction arrays for the summary report
         report_entry = {k: v for k, v in r.items() if not isinstance(v, list)}
         summary["per_dataset"][ds_name] = report_entry

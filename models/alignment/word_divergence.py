@@ -198,10 +198,10 @@ class WordLevelDivergence(nn.Module):
         _, top_idx = torch.topk(divergences, top_k)
         top_positions = top_idx.float() / max(n - 1, 1)
         if top_k < 3:
-            pad = torch.zeros(3 - top_k, device=divergences.device)
+            pad = torch.zeros(3 - top_k, device=divergences.device, dtype=divergences.dtype)
             top_positions = torch.cat([top_positions, pad])
 
-        n_words_norm = torch.tensor(min(n / 50.0, 1.0), device=divergences.device)
+        n_words_norm = torch.tensor(min(n / 50.0, 1.0), device=divergences.device, dtype=divergences.dtype)
 
         # skewness
         if n > 2 and std_div > 1e-6:
@@ -210,9 +210,10 @@ class WordLevelDivergence(nn.Module):
             skewness = divergences.new_zeros(())
 
         # entropy
-        if n > 1 and divergences.sum() > 1e-6:
-            p = divergences / divergences.sum()
-            entropy = -(p * torch.log(p + 1e-9)).sum()
+        div_nonneg = divergences.clamp(min=0.0)
+        if n > 1 and div_nonneg.sum() > 1e-6:
+            p = div_nonneg / div_nonneg.sum()
+            entropy = -(p * torch.log(p.clamp(min=1e-9))).sum()
         else:
             entropy = divergences.new_zeros(())
 
@@ -290,15 +291,18 @@ class WordLevelDivergence(nn.Module):
                 # Map time to frame indices
                 f_start = max(0, int(w_start * frame_rate))
                 f_end = min(frames.size(0), int(w_end * frame_rate))
-                if f_end <= f_start:
-                    continue
-                word_audio.append(frames[f_start:f_end].mean(dim=0))
+                has_audio = (f_end > f_start)
 
                 # Map to text token span
+                has_text = False
+                t_start, t_end = 0, 0
                 if w_idx < len(token_word_boundaries[b]):
                     t_start, t_end = token_word_boundaries[b][w_idx]
-                    if t_end > t_start:
-                        word_text.append(text_token_embeds[b, t_start:t_end].mean(dim=0))
+                    has_text = (t_end > t_start)
+
+                if has_audio and has_text:
+                    word_audio.append(frames[f_start:f_end].mean(dim=0))
+                    word_text.append(text_token_embeds[b, t_start:t_end].mean(dim=0))
 
             if not word_audio or not word_text:
                 feats.append(torch.zeros(self.DIVERGENCE_FEAT_DIM, device=audio_frame_embeds.device))

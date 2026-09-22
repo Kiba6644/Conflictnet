@@ -110,8 +110,11 @@ class ExperimentConfig:
             if attr_name in known and val is not None:
                 kwargs[attr_name] = val
             elif attr_name in cli_to_field:
-                # Invert: CLI stores action_store_true as "True when disabled"
-                kwargs[cli_to_field[attr_name]] = not val
+                # Invert: CLI stores action_store_true as "True when disabled" (unless direct passthrough)
+                if attr_name == "use_adaptive_router":
+                    kwargs[cli_to_field[attr_name]] = bool(val)
+                else:
+                    kwargs[cli_to_field[attr_name]] = not val
 
         return cls(**kwargs)
 

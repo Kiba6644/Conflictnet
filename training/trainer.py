@@ -565,8 +565,10 @@ class ConflictNetTrainer:
         self.model.eval()
         self.ema_model.eval()
         
-        # Use EMA model for evaluation
-        _model_for_eval = getattr(self.ema_model, "module", self.ema_model)
+        # Use unwrapped EMA model for evaluation
+        _model_for_eval = self.ema_model
+        while hasattr(_model_for_eval, "module"):
+            _model_for_eval = _model_for_eval.module
         _model_for_eval.eval()
 
         if is_ddp and local_rank != 0:
@@ -575,6 +577,9 @@ class ConflictNetTrainer:
             # checkpointing and early stopping.
             metric_values = torch.zeros(len(metric_keys), device=self.device)
             torch.distributed.broadcast(metric_values, src=0)
+            self.model.train()
+            if (metric_values == -1.0).all():
+                raise RuntimeError("Rank 0 encountered an exception during evaluation; worker rank aborting.")
             return {key: float(value) for key, value in zip(metric_keys, metric_values.cpu().tolist())}
 
         # Clear context cache to prevent training dialogue context from
@@ -814,9 +819,10 @@ class ConflictNetTrainer:
             is_pretrain = epoch < pretrain_epochs
             phase = "pretrain" if is_pretrain else "finetune"
 
-            # Reset early stopping patience when transitioning from pretrain to finetune
+            # Reset early stopping patience and best F1 when transitioning from pretrain to finetune
             if epoch == pretrain_epochs:
-                logger.info("Transitioning from PRETRAIN to FINETUNE phase. Resetting early stopping counter.")
+                logger.info("Transitioning from PRETRAIN to FINETUNE phase. Resetting early stopping counter and best F1.")
+                self.best_val_f1 = 0.0
                 self._best_val_f1 = 0.0
                 self._patience_counter = 0
 

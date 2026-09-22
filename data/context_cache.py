@@ -17,7 +17,7 @@ Usage in trainer::
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
@@ -140,7 +140,7 @@ class ContextCache:
             turn_index: Optional turn index.
             speaker_role: Integer speaker role in [0, 15].
         """
-        fe = turn_embed.detach()
+        fe = turn_embed.detach().clone()
         if fe.dim() == 1:
             fe = fe.unsqueeze(0)
         history = self._cache.setdefault(conv_id, [])

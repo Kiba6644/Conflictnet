@@ -322,8 +322,11 @@ class ContextGatedContrastiveLoss(nn.Module):
         # Supervised Contrastive Loss (SupCon) or standard symmetric InfoNCE
         if emotion_labels is not None and not (sarcasm_mask is not None and sarcasm_mask.all()):
             if emotion_labels.dim() == 2:
-                emotion_labels = emotion_labels.argmax(dim=-1)
-            in_batch_pos = emotion_labels.unsqueeze(1) == emotion_labels.unsqueeze(0)  # (B, B)
+                has_label = (emotion_labels.sum(dim=-1) > 0)
+                labels_idx = torch.where(has_label, emotion_labels.argmax(dim=-1), torch.tensor(-1, device=emotion_labels.device))
+                in_batch_pos = (labels_idx.unsqueeze(1) == labels_idx.unsqueeze(0)) & (labels_idx.unsqueeze(1) >= 0)
+            else:
+                in_batch_pos = emotion_labels.unsqueeze(1) == emotion_labels.unsqueeze(0)  # (B, B)
             if sarcasm_mask is not None and sarcasm_mask.any():
                 in_batch_pos[sarcasm_mask] = False
                 in_batch_pos[:, sarcasm_mask] = False

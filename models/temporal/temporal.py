@@ -40,11 +40,8 @@ class SpeakerRoleEmbedding(nn.Module):
         self.embedding = nn.Embedding(num_speakers, embed_dim)
 
     def forward(self, x: torch.Tensor, speaker_roles: torch.Tensor) -> torch.Tensor:
-        """
-        x: (B, T, D)
-        speaker_roles: (B, T) — integer in [0, num_speakers - 1] indicating which speaker each turn belongs to
-        """
-        clamped_roles = speaker_roles.clamp(0, self.num_speakers - 1)
+        """x: (B, T, D), speaker_roles: (B, T) int."""
+        clamped_roles = speaker_roles.to(device=x.device).clamp(0, self.num_speakers - 1)
         return x + self.embedding(clamped_roles)
 
 
@@ -119,7 +116,7 @@ class TransformerTemporalContext(nn.Module):
 
         ff_dim = ff_dim or embed_dim * 4
         
-        self.pos_encoding = LearnedPositionalEncoding(max_turns, embed_dim)
+        self.pos_encoding = LearnedPositionalEncoding(max_turns + 1, embed_dim)
         self.speaker_role_emb = SpeakerRoleEmbedding(embed_dim, num_speakers=num_speakers) if use_speaker_roles else None
 
         encoder_layer = DropPathTransformerEncoderLayer(
@@ -163,8 +160,8 @@ class TransformerTemporalContext(nn.Module):
         B, T, D = turn_embeds.shape
         assert D == self.embed_dim, \
             f"Expected embed_dim={self.embed_dim}, got {D}"
-        assert T <= self.max_turns, \
-            f"Sequence length {T} exceeds max_turns={self.max_turns}"
+        assert T <= self.max_turns + 1, \
+            f"Sequence length {T} exceeds max_turns+1={self.max_turns + 1}"
 
         x = self.pos_encoding(turn_embeds)  # (B, T, D)
 

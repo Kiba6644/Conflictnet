@@ -52,7 +52,10 @@ class _TextWrapper(nn.Module):
         audio_embed: Any = self.model.audio_proj(audio_raw)  # type: ignore[union-attr]
         speaker_feat = torch.zeros_like(audio_embed)
         fused: Any = self.model.fuse(audio_embed, text_embed, speaker_feat)  # type: ignore[union-attr]
-        logits, _, _, _ = self.model.classifier(fused)  # type: ignore[union-attr]
+        try:
+            logits, _, _, _ = self.model.classifier(fused, audio_embed=audio_embed, text_embed=text_embed)  # type: ignore[union-attr]
+        except TypeError:
+            logits, _, _, _ = self.model.classifier(fused)  # type: ignore[union-attr]
         return logits.sum(dim=-1)  # scalar per batch item
 
 
@@ -75,7 +78,10 @@ class _AudioWrapper(nn.Module):
         text_embed: Any = self.model.text_proj(text_raw)  # type: ignore[union-attr]
         speaker_feat = torch.zeros_like(audio_embed)
         fused: Any = self.model.fuse(audio_embed, text_embed, speaker_feat)  # type: ignore[union-attr]
-        logits, _, _, _ = self.model.classifier(fused)  # type: ignore[union-attr]
+        try:
+            logits, _, _, _ = self.model.classifier(fused, audio_embed=audio_embed, text_embed=text_embed)  # type: ignore[union-attr]
+        except TypeError:
+            logits, _, _, _ = self.model.classifier(fused)  # type: ignore[union-attr]
         return logits.sum(dim=-1)
 
 
